@@ -357,7 +357,8 @@ async function capture() {
   }
 
   try {
-    await api('POST', '/api/capture');
+    // While the new shot is shown, live view waits until its JPEG is saved.
+    await api('POST', '/api/capture', { isLiveViewHeld: elements.autoPreview.checked });
   } catch (error) {
     showToast(`Capture failed: ${error.message}`);
   }
@@ -712,7 +713,7 @@ function openViewer(entry) {
   document.body.classList.add('is-viewer-open');
   elements.viewerCanvas.classList.remove('is-zoomed');
   elements.viewerTitle.textContent = entry.name;
-  elements.viewerFiles.textContent = entry.files.length ? entry.files.join('  ') : 'saving JPEG...';
+  elements.viewerFiles.textContent = viewerFilesText(entry);
   // The full JPEG replaces the preview once loaded, so the preview shows meanwhile.
   elements.viewerImage.src = `/files/preview/${encodeURIComponent(entry.name)}.jpg`;
   if (entry.fullImage) {
@@ -727,6 +728,19 @@ function openViewer(entry) {
   }
 
   renderViewerActions();
+}
+
+function viewerFilesText(entry) {
+  if (entry.files.length > 0) {
+    return entry.files.join('  ');
+  }
+
+  // A RAW-only shot has no JPEG; the viewer shows the camera's preview.
+  if (entry.raw !== null) {
+    return 'RAW only: preview shown';
+  }
+
+  return 'saving JPEG...';
 }
 
 function viewedCapture() {

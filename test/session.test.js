@@ -77,6 +77,49 @@ test('a capture saves the preview and JPEG and leaves the RAW on the card', asyn
   assert.equal(capture.fullImage, 'P1100135.JPG');
 });
 
+test('a held capture releases live view once the JPEG is saved, or saving failed', async (context) => {
+  for (const isJpegFailing of [false, true]) {
+    const steps = [];
+    const controller = fakeController({ failDownloads: (url) => isJpegFailing && url.endsWith('DO1100135.JPG') });
+    const download = controller.download;
+    controller.download = async (url, destinationPath, options) => {
+      steps.push(`download ${url.split('/').at(-1)}`);
+      await download(url, destinationPath, options);
+    };
+    controller.capture = async ({ isLiveViewHeld }) => {
+      steps.push(`capture held=${isLiveViewHeld}`);
+      return RESOURCES;
+    };
+    controller.releaseLiveView = async () => {
+      steps.push('release');
+    };
+    const { session } = await sessionIn(context, controller);
+
+    const capture = session.capture({ isLiveViewHeld: true });
+    if (isJpegFailing) {
+      await assert.rejects(capture);
+    } else {
+      await capture;
+    }
+
+    assert.deepEqual(steps, ['capture held=true', 'download DL1100135.JPG', 'download DO1100135.JPG', 'release']);
+  }
+});
+
+test('a RAW-only capture saves its preview and lists the RAW on the card', async (context) => {
+  const controller = fakeController();
+  controller.capture = async () => RESOURCES.filter((resource) => !(resource.kind === 'original' && resource.extension === 'JPG'));
+  const { session, directory } = await sessionIn(context, controller);
+
+  const result = await session.capture();
+
+  assert.deepEqual(result, { name: 'P1100135', files: [] });
+  assert.deepEqual(await readdir(directory), ['.previews']);
+  const [capture] = await session.listCaptures();
+  assert.equal(capture.raw, 'on-camera');
+  assert.equal(capture.fullImage, null);
+});
+
 test('Download RAW fetches missing RAW files and marks them saved', async (context) => {
   const { session, directory } = await sessionIn(context, fakeController());
   await session.capture();

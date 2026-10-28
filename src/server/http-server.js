@@ -116,10 +116,11 @@ export function createHttpServer({ controller, session, onDirectoryChange = asyn
     };
   }
 
-  async function runCapture() {
+  async function runCapture({ isLiveViewHeld }) {
     broadcast({ type: 'capture', phase: 'shooting' });
     try {
       const { name, files } = await session.capture({
+        isLiveViewHeld,
         onShot: () => broadcast({ type: 'capture', phase: 'shot' }),
         onPreview: (previewName) => broadcast({ type: 'capture', phase: 'downloading', name: previewName }),
       });
@@ -168,11 +169,11 @@ export function createHttpServer({ controller, session, onDirectoryChange = asyn
 
     'POST /api/focus/drive': async ({ body }) => ({ position: await controller.driveFocus(body.direction, body.speed) }),
 
-    'POST /api/capture': async () => {
+    'POST /api/capture': async ({ body }) => {
       if (controller.isCapturing) {
         throw new CameraBusyError('a capture is in progress');
       }
-      runCapture();
+      runCapture({ isLiveViewHeld: body.isLiveViewHeld === true });
 
       return { ok: true };
     },

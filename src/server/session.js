@@ -135,11 +135,22 @@ export class CaptureSession extends EventEmitter {
 
   // Shoots (reported through onShot once the camera is free again), saves
   // the preview (reported through onPreview) and then the JPEG. A RAW file
-  // stays on the card until downloadRaw fetches it.
-  async capture({ onShot = () => {}, onPreview = () => {} } = {}) {
+  // stays on the card until downloadRaw fetches it. With isLiveViewHeld, live
+  // view stays paused until the JPEG is saved, which speeds up the download.
+  async capture({ onShot = () => {}, onPreview = () => {}, isLiveViewHeld = false } = {}) {
     await mkdir(this.previewDirectory, { recursive: true });
-    const resources = await this.controller.capture();
+    const resources = await this.controller.capture({ isLiveViewHeld });
     onShot();
+    try {
+      return await this.#saveShot(resources, onPreview);
+    } finally {
+      if (isLiveViewHeld) {
+        await this.controller.releaseLiveView();
+      }
+    }
+  }
+
+  async #saveShot(resources, onPreview) {
     const originals = resources.filter((resource) => resource.kind === 'original');
     const preview = resources.find((resource) => resource.kind === 'preview');
     if (originals.length === 0) {
