@@ -21,10 +21,42 @@ over the camera's own WiFi network, and serves a web page with:
 
 ## Camera compatibility
 
-Tested only with a **Panasonic Lumix DMC-G7 (G70)**. Other
-Lumix models with WiFi that work with Panasonic's Image App use the same
-HTTP API (`cam.cgi`) and may work, but they are untested. The settings
-offered, and which of them a camera accepts, can differ by model.
+Tested only with a **Panasonic Lumix DMC-G7 (G70)** on firmware 2.2. The
+header shows the model and firmware of the camera that took the newest
+JPEG in the save folder, read from its EXIF data.
+
+### Likely to work
+
+Lumix cameras that support remote shooting with Panasonic's **Image App**
+over WiFi speak the same HTTP API (`cam.cgi`), so these are likely to work.
+None of them has been tried:
+
+| Series | Models |
+| --- | --- |
+| G | G80 / G85, G81, G9 |
+| GH | GH4, GH5, GH5S |
+| GX | GX7, GX8, GX80 / GX85, GX9 |
+| GF | GF7, GF8, GF9 / GX800 / GX850, GF10 / GX880 |
+| Compact | LX100, LX100 II, TZ100 / ZS100, TZ200 / ZS200, FZ1000, FZ2000 / FZ2500 |
+
+Expect differences: the settings a camera lists, which of them it accepts
+over WiFi, and which controls only a dial or lever on the body can change.
+Newer models that pair only with the **Lumix Sync** app (for example the
+GH6, G9 II and S5 II) use a different protocol and are unlikely to work.
+
+### Report your camera
+
+If you try Lumix Remote with another camera, please
+[open an issue](https://github.com/stylesuxx/lumix-remote/issues) and say
+whether it worked. Include:
+
+- the model and firmware shown in the header
+- what worked: live view, click to focus, manual focus, settings, capture,
+  Download RAW
+- what failed, with the error message from the page or the terminal
+
+Run the server with `--verbose` when something fails; the extra output
+helps.
 
 ## Requirements
 

@@ -535,6 +535,9 @@ function renderSession(session) {
   }
 
   captures = session.captures;
+  elements.cameraInfo.textContent = session.camera
+    ? [session.camera.model, session.camera.firmware && `firmware ${session.camera.firmware}`].filter(Boolean).join(' · ')
+    : '';
   renderGallery();
   renderViewerActions();
 }

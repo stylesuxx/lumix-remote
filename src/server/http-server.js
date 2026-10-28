@@ -109,7 +109,11 @@ export function createHttpServer({ controller, session, onDirectoryChange = asyn
   );
 
   async function sessionState() {
-    return { directory: session.directory, captures: await session.listCaptures() };
+    return {
+      directory: session.directory,
+      captures: await session.listCaptures(),
+      camera: await session.readCameraInfo(),
+    };
   }
 
   async function runCapture() {

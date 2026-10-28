@@ -30,6 +30,7 @@ function fakeSession(overrides = {}) {
     directory: '/photos',
     pendingRawNames: [],
     listCaptures: async () => [],
+    readCameraInfo: async () => ({ model: 'DMC-G70', firmware: '2.2' }),
     deleted: [],
     async deleteCapture(name) {
       if (name.includes('/')) {
@@ -105,7 +106,9 @@ test('rejects a capture while one is running', async (context) => {
 test('deletes captures by name and queues RAW downloads', async (context) => {
   const { request, session } = await serve(context);
 
-  assert.equal((await request('DELETE', '/api/captures/P1100135')).status, 200);
+  const afterDelete = await request('DELETE', '/api/captures/P1100135');
+  assert.equal(afterDelete.status, 200);
+  assert.deepEqual(afterDelete.body.camera, { model: 'DMC-G70', firmware: '2.2' });
   assert.equal((await request('DELETE', '/api/captures/..%2Fsecret')).status, 400);
   assert.equal((await request('DELETE', '/api/captures/%E0%A4%A')).status, 400);
   assert.deepEqual(session.deleted, ['P1100135']);

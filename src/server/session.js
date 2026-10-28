@@ -9,6 +9,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { DownloadQueue } from './download-queue.js';
+import { readCameraInfo } from './exif.js';
 
 const PREVIEW_FOLDER = '.previews';
 const RAW_EXTENSION = 'RW2';
@@ -217,6 +218,17 @@ export class CaptureSession extends EventEmitter {
     }
 
     return captures.sort((first, second) => second.modifiedAt - first.modifiedAt);
+  }
+
+  // { model, firmware } from the EXIF data of the newest JPEG in this folder,
+  // or null when the folder has none.
+  async readCameraInfo() {
+    const newest = (await this.listCaptures()).find((capture) => capture.fullImage !== null);
+    if (!newest) {
+      return null;
+    }
+
+    return readCameraInfo(path.join(this.directory, newest.fullImage)).catch(() => null);
   }
 
   // Queues the RAW of every listed capture that has one on the card and not
