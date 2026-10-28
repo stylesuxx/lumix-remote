@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumix Remote</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Lumix Remote</h1>
+    <div class="status" id="status">
+      <span class="chip" id="connection">connecting</span>
+      <span class="chip" id="battery"></span>
+      <span class="chip" id="shots"></span>
+      <span class="chip" id="focusMode"></span>
+      <span class="chip is-busy" id="downloads"></span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage">
+      <div class="viewport" id="viewport">
+        <img id="live" alt="Live view">
+        <div class="focus-marker is-dimmed" id="focusMarker" hidden></div>
+        <div class="viewport-message" id="liveMessage">Waiting for live view</div>
+        <div class="capture-overlay" id="captureOverlay" hidden></div>
+      </div>
+
+      <div class="controls">
+        <div class="focus-controls">
+          <span class="control-label">Focus</span>
+          <button type="button" data-focus="near" data-speed="fast" title="Near, fast (Shift+Left)">&laquo; Near</button>
+          <button type="button" data-focus="near" data-speed="normal" title="Near, fine (Left)">&lsaquo;</button>
+          <div class="focus-meter" title="Focus position"><div id="focusPosition"></div></div>
+          <button type="button" data-focus="far" data-speed="normal" title="Far, fine (Right)">&rsaquo;</button>
+          <button type="button" data-focus="far" data-speed="fast" title="Far, fast (Shift+Right)">Far &raquo;</button>
+        </div>
+        <div class="capture-controls">
+          <label class="checkbox" for="autoPreview">
+            <input type="checkbox" id="autoPreview" checked>
+            Show each shot after capture
+          </label>
+          <button type="button" class="capture-button" id="captureButton" title="Take picture (Space)">Capture</button>
+        </div>
+      </div>
+      <p class="hint" id="focusHint">Click the live view to autofocus on that point (sets AF mode to Touch AF). The Near/Far buttons need the focus lever on MF.</p>
+    </section>
+
+    <aside class="sidebar">
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>Settings</h2>
+          <button type="button" class="refresh-button" id="refreshButton" title="Read the settings from the camera again">Refresh</button>
+        </div>
+        <form class="settings" id="settings"></form>
+        <dl class="read-only" id="readOnly"></dl>
+      </section>
+
+      <section class="panel">
+        <h2>Save to</h2>
+        <form class="directory" id="directoryForm">
+          <input type="text" id="directoryInput" spellcheck="false" autocomplete="off" aria-label="Save directory">
+          <button type="submit">Use</button>
+        </form>
+        <button type="button" class="browse-button" id="browseButton">Browse...</button>
+        <p class="hint">Typed folders are created if missing. Remembered for next time.</p>
+      </section>
+    </aside>
+  </main>
+
+  <section class="gallery-drawer" id="galleryDrawer">
+    <div class="gallery" id="gallery"></div>
+    <div class="gallery-bar">
+      <button type="button" class="gallery-handle" id="galleryHandle">This folder <span id="captureCount"></span></button>
+      <button type="button" class="small-button" id="downloadRawButton" title="Download the RAW files of every shot in this folder that has none yet">Download RAW</button>
+    </div>
+  </section>
+
+  <div class="viewer" id="viewer" hidden>
+    <div class="viewer-bar">
+      <span id="viewerTitle"></span>
+      <span class="viewer-files" id="viewerFiles"></span>
+      <span class="spacer"></span>
+      <button type="button" id="viewerPrevious" title="Previous (Left)">&lsaquo;</button>
+      <button type="button" id="viewerNext" title="Next (Right)">&rsaquo;</button>
+      <button type="button" id="viewerZoom" title="Toggle 100% (Z or click)">100%</button>
+      <button type="button" id="viewerRaw" title="Download this shot's RAW file" hidden>Download RAW</button>
+      <button type="button" id="viewerDelete" title="Delete this shot from the folder (Delete)">Delete</button>
+      <button type="button" id="viewerClose" title="Back to live view (Esc)">Live view</button>
+    </div>
+    <div class="viewer-canvas" id="viewerCanvas">
+      <img id="viewerImage" alt="">
+    </div>
+  </div>
+
+  <dialog class="folder-dialog" id="folderDialog">
+    <form method="dialog" class="folder-form">
+      <div class="folder-path" id="folderPath"></div>
+      <div class="folder-actions">
+        <button type="button" id="folderUp">Up</button>
+        <button type="button" id="folderHome">Home</button>
+      </div>
+      <ul class="folder-list" id="folderList"></ul>
+      <div class="folder-new">
+        <input type="text" id="folderNewName" placeholder="New folder name" spellcheck="false" autocomplete="off">
+        <button type="button" id="folderCreate">Create</button>
+      </div>
+      <div class="folder-footer">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="button" class="primary" id="folderChoose">Save here</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
