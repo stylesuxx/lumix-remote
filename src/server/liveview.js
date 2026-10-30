@@ -95,6 +95,7 @@ export class LiveView extends EventEmitter {
 
     try {
       if (isStalled) {
+        await this.camera.requestAccess();
         await this.camera.recordMode();
         await this.camera.startStream(this.port);
       } else {

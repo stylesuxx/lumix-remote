@@ -5,28 +5,16 @@
 import { constants } from 'node:fs';
 import { access, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
-import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { DownloadQueue } from './download-queue.js';
 import { readCameraInfo } from './exif.js';
+import { expandHome } from './folders.js';
 
 const PREVIEW_FOLDER = '.previews';
 const RAW_EXTENSION = 'RW2';
 
 export class InvalidCaptureError extends Error {}
-
-export function expandHome(directory) {
-  if (directory === '~') {
-    return homedir();
-  }
-
-  if (directory.startsWith('~/')) {
-    return path.join(homedir(), directory.slice(2));
-  }
-
-  return directory;
-}
 
 function timestamp(date = new Date()) {
   const pad = (number) => String(number).padStart(2, '0');
@@ -49,35 +37,11 @@ function isPlainName(name) {
   return typeof name === 'string' && name !== '' && name === path.basename(name) && !name.startsWith('.');
 }
 
-// Subfolders of a directory for the folder browser, hidden ones excluded.
-export async function listDirectories(directory) {
-  const resolved = path.resolve(expandHome(directory || '~'));
-  const entries = await readdir(resolved, { withFileTypes: true });
-  const directories = entries
-    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-    .map((entry) => entry.name)
-    .sort((first, second) => first.localeCompare(second, undefined, { sensitivity: 'base' }));
-  const parent = path.dirname(resolved);
-
-  return { path: resolved, parent: parent === resolved ? null : parent, home: homedir(), directories };
-}
-
-// Creates a folder inside a directory; the name must be a single path segment.
-export async function createDirectory(directory, name) {
-  const trimmed = String(name ?? '').trim();
-  if (!trimmed || trimmed !== path.basename(trimmed) || trimmed === '.' || trimmed === '..') {
-    throw new InvalidCaptureError(`invalid folder name: ${name}`);
-  }
-  const created = path.join(path.resolve(expandHome(directory)), trimmed);
-  await mkdir(created);
-
-  return created;
-}
-
-// Events: 'raw-pending' (names of captures whose RAW is queued),
-// 'raw-progress' ({ name, receivedBytes, totalBytes }, about once a second),
-// 'raw-saved' ({ name, bytes, milliseconds }) and 'raw-failed' ({ name, error,
-// retryInMilliseconds }), where retryInMilliseconds is null once given up.
+// Events: 'change' whenever the listing may have changed, 'raw-pending'
+// (names of captures whose RAW is queued), 'raw-progress' ({ name,
+// receivedBytes, totalBytes }, about once a second), 'raw-saved' ({ name,
+// bytes, milliseconds }) and 'raw-failed' ({ name, error, retryInMilliseconds
+// }), where retryInMilliseconds is null once given up.
 export class CaptureSession extends EventEmitter {
   #queue;
 
@@ -88,17 +52,25 @@ export class CaptureSession extends EventEmitter {
     this.controller = controller;
     this.directory = path.resolve(expandHome(directory));
     this.#queue = new DownloadQueue({
-      download: (url, destinationPath, onProgress) => controller.download(url, destinationPath, { onProgress }),
+      download: (url, destinationPath, onProgress, signal) =>
+        controller.download(url, destinationPath, { onProgress, signal, isResumable: true }),
       retryDelaysMilliseconds,
     });
-    this.#queue.on('change', () => this.emit('raw-pending', this.#queue.pendingKeys));
+    this.#queue.on('change', () => {
+      this.emit('raw-pending', this.#queue.pendingKeys);
+      this.emit('change');
+    });
     this.#queue.on('progress', (job) =>
       this.emit('raw-progress', { name: job.key, receivedBytes: job.receivedBytes, totalBytes: job.totalBytes }),
     );
     this.#queue.on('done', (job) =>
       this.emit('raw-saved', { name: job.key, bytes: job.receivedBytes, milliseconds: job.milliseconds }),
     );
-    this.#queue.on('discarded', (job) => rm(job.destinationPath, { force: true }).catch(() => {}));
+    this.#queue.on('discarded', (job) =>
+      Promise.all([job.destinationPath, `${job.destinationPath}.part`].map((filePath) => rm(filePath, { force: true }))).catch(
+        () => {},
+      ),
+    );
     this.#queue.on('failed', ({ job, error, retryInMilliseconds }) =>
       this.emit('raw-failed', { name: job.key, error, retryInMilliseconds }),
     );
@@ -108,15 +80,13 @@ export class CaptureSession extends EventEmitter {
     return path.join(this.directory, PREVIEW_FOLDER);
   }
 
-  get pendingRawNames() {
-    return this.#queue.pendingKeys;
-  }
 
   async setDirectory(directory) {
     const resolved = path.resolve(expandHome(directory.trim()));
     await mkdir(path.join(resolved, PREVIEW_FOLDER), { recursive: true });
     await access(resolved, constants.W_OK);
     this.directory = resolved;
+    this.emit('change');
 
     return resolved;
   }
@@ -135,18 +105,25 @@ export class CaptureSession extends EventEmitter {
 
   // Shoots (reported through onShot once the camera is free again), saves
   // the preview (reported through onPreview) and then the JPEG. A RAW file
-  // stays on the card until downloadRaw fetches it. With isLiveViewHeld, live
-  // view stays paused until the JPEG is saved, which speeds up the download.
+  // stays on the card until downloadRaw fetches it; RAW downloads pause from
+  // the shutter until the JPEG is saved and then continue where they stopped.
+  // With isLiveViewHeld, live view stays paused until the JPEG is saved, which
+  // speeds up the download.
   async capture({ onShot = () => {}, onPreview = () => {}, isLiveViewHeld = false } = {}) {
     await mkdir(this.previewDirectory, { recursive: true });
-    const resources = await this.controller.capture({ isLiveViewHeld });
-    onShot();
+    this.#queue.pause();
     try {
-      return await this.#saveShot(resources, onPreview);
-    } finally {
-      if (isLiveViewHeld) {
-        await this.controller.releaseLiveView();
+      const resources = await this.controller.capture({ isLiveViewHeld });
+      onShot();
+      try {
+        return await this.#saveShot(resources, onPreview);
+      } finally {
+        if (isLiveViewHeld) {
+          await this.controller.releaseLiveView();
+        }
       }
+    } finally {
+      this.#queue.resume();
     }
   }
 
@@ -170,6 +147,7 @@ export class CaptureSession extends EventEmitter {
     if (preview) {
       await this.controller.download(preview.url, path.join(this.previewDirectory, `${name}.jpg`));
       onPreview(name);
+      this.emit('change');
     }
     const files = [];
     for (const original of originals.filter((resource) => resource !== raw)) {
@@ -177,6 +155,8 @@ export class CaptureSession extends EventEmitter {
       await this.controller.download(original.url, path.join(this.directory, fileName));
       files.push(fileName);
     }
+    this.emit('change');
+
     return { name, files };
   }
 
@@ -231,15 +211,14 @@ export class CaptureSession extends EventEmitter {
     return captures.sort((first, second) => second.modifiedAt - first.modifiedAt);
   }
 
-  // { model, firmware } from the EXIF data of the newest JPEG in this folder,
-  // or null when the folder has none.
-  async readCameraInfo() {
-    const newest = (await this.listCaptures()).find((capture) => capture.fullImage !== null);
-    if (!newest) {
-      return null;
-    }
+  // The save folder, its captures (see listCaptures) and the camera's
+  // { model, firmware } read from the newest JPEG, or null without one.
+  async snapshot() {
+    const captures = await this.listCaptures();
+    const newest = captures.find((capture) => capture.fullImage !== null);
+    const camera = newest ? await readCameraInfo(path.join(this.directory, newest.fullImage)).catch(() => null) : null;
 
-    return readCameraInfo(path.join(this.directory, newest.fullImage)).catch(() => null);
+    return { directory: this.directory, captures, camera };
   }
 
   // Queues the RAW of every listed capture that has one on the card and not
@@ -279,6 +258,7 @@ export class CaptureSession extends EventEmitter {
       rm(path.join(this.previewDirectory, `${name}.jpg`), { force: true }),
       rm(path.join(this.previewDirectory, `${name}.json`), { force: true }),
     ]);
+    this.emit('change');
   }
 
   // Resolves a requested file inside the save folder, rejecting anything

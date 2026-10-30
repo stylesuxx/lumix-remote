@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
 import { parseContentResources } from '../src/server/lumix.js';
-import { CaptureSession, createDirectory, InvalidCaptureError, listDirectories } from '../src/server/session.js';
+import { CaptureSession, InvalidCaptureError } from '../src/server/session.js';
 import { BROWSE_RESPONSE } from './support/fake-camera.js';
 
 const RESOURCES = parseContentResources(BROWSE_RESPONSE);
@@ -149,6 +149,37 @@ test('a failed RAW download is retried and reported', async (context) => {
   assert.deepEqual(failures, [0]);
 });
 
+test('a capture pauses a RAW download, which continues once the JPEG is saved', async (context) => {
+  const rawSignals = [];
+  const controller = fakeController();
+  const plainDownload = controller.download;
+  controller.download = (url, destinationPath, options = {}) => {
+    if (!url.endsWith('.RW2') || rawSignals.some((signal) => signal.aborted)) {
+      return plainDownload(url, destinationPath, options);
+    }
+
+    rawSignals.push(options.signal);
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  };
+  const { session } = await sessionIn(context, controller);
+  await session.capture();
+  const failures = [];
+  session.on('raw-failed', (failure) => failures.push(failure));
+  const saved = nextEvent(session, 'raw-saved');
+
+  await session.downloadRaw();
+  await eventually(() => assert.equal(rawSignals.length, 1));
+  const capture = session.capture();
+  await eventually(() => assert.equal(rawSignals[0].aborted, true));
+  await capture;
+
+  assert.equal((await saved).name, 'P1100135');
+  assert.deepEqual(failures, []);
+  assert.ok(controller.downloaded.filter((url) => url.endsWith('.RW2')).length >= 1);
+});
+
 test('deleting a capture removes its files and its pending RAW', async (context) => {
   const rawStarted = Promise.withResolvers();
   const rawRelease = Promise.withResolvers();
@@ -167,7 +198,6 @@ test('deleting a capture removes its files and its pending RAW', async (context)
   await session.downloadRaw();
   await rawStarted.promise;
   await session.deleteCapture('P1100135');
-  assert.deepEqual(session.pendingRawNames, []);
   rawRelease.resolve();
 
   assert.deepEqual(await session.listCaptures(), []);
@@ -186,24 +216,18 @@ test('a repeated card number gets a timestamp in front', async (context) => {
   assert.equal((await session.listCaptures()).length, 2);
 });
 
-test('lists visible subfolders sorted by name, with the parent', async (context) => {
-  const root = await temporaryDirectory(context);
-  for (const name of ['beta', 'Alpha', '.hidden']) {
-    await mkdir(path.join(root, name));
-  }
+test('a snapshot lists the folder and signals each change', async (context) => {
+  const { session, directory } = await sessionIn(context, fakeController());
+  let changes = 0;
+  session.on('change', () => {
+    changes += 1;
+  });
 
-  const listing = await listDirectories(root);
+  await session.capture();
+  const snapshot = await session.snapshot();
 
-  assert.equal(listing.path, root);
-  assert.equal(listing.parent, path.dirname(root));
-  assert.deepEqual(listing.directories, ['Alpha', 'beta']);
-});
-
-test('creates a folder from a single name and rejects paths', async (context) => {
-  const root = await temporaryDirectory(context);
-
-  assert.equal(await createDirectory(root, ' shoot '), path.join(root, 'shoot'));
-  await assert.rejects(createDirectory(root, '../escape'));
-  await assert.rejects(createDirectory(root, '..'));
-  await assert.rejects(createDirectory(root, ''));
+  assert.equal(snapshot.directory, directory);
+  assert.deepEqual(snapshot.captures.map((capture) => capture.name), ['P1100135']);
+  assert.equal(snapshot.camera, null);
+  assert.equal(changes, 2);
 });

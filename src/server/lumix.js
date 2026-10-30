@@ -1,7 +1,7 @@
 // Client for the HTTP API that Panasonic Lumix cameras expose over WiFi
 // (cam.cgi on port 80, UPnP ContentDirectory on port 60606).
 import { createWriteStream } from 'node:fs';
-import { rename, unlink } from 'node:fs/promises';
+import { rename, stat, unlink } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -106,6 +106,14 @@ function browseRequest(startingIndex, requestedCount) {
   );
 }
 
+async function fileSize(filePath) {
+  try {
+    return (await stat(filePath)).size;
+  } catch {
+    return 0;
+  }
+}
+
 export class LumixCamera {
   #queue = Promise.resolve();
 
@@ -184,6 +192,13 @@ export class LumixCamera {
     };
   }
 
+  // Registers this program as the camera's remote. A freshly started camera
+  // answers commands only after this request.
+  async requestAccess(deviceName = 'lumix-remote') {
+    await this.command(`mode=accctrl&type=req_acc&value=0&value2=${deviceName}`);
+    await this.command(`mode=setsetting&type=device_name&value=${deviceName}`);
+  }
+
   recordMode() {
     return this.command('mode=camcmd&value=recmode');
   }
@@ -246,7 +261,9 @@ export class LumixCamera {
   }
 
   // Fires the shutter and returns the resources of the new image. Leaves the
-  // camera in playback mode so the files can be downloaded.
+  // camera in playback mode so the files can be downloaded. The camera accepts
+  // the command even when it then refuses to fire (no focus lock), so a shot
+  // without an image within timeoutMilliseconds is cancelled.
   async captureImage({ timeoutMilliseconds = 60000 } = {}) {
     await this.playMode();
     const countBefore = await this.getContentCount();
@@ -269,26 +286,48 @@ export class LumixCamera {
       }
     }
 
-    throw new CameraError(`no new image appeared within ${timeoutMilliseconds / 1000}s`, 'timeout');
+    try {
+      await this.command('mode=camcmd&value=capture_cancel');
+    } catch {
+      // The shot is reported as failed either way.
+    }
+
+    throw new CameraError(
+      `the camera took no picture within ${Math.round(timeoutMilliseconds / 1000)} s (focus not found?)`,
+      'timeout',
+    );
   }
 
   // Downloads into a .part file, renamed when complete. Fails when no data
-  // arrives for idleTimeoutMilliseconds. onProgress(receivedBytes, totalBytes)
-  // runs for every chunk; totalBytes is null without a Content-Length.
-  async download(url, destinationPath, { idleTimeoutMilliseconds = 20000, onProgress = () => {} } = {}) {
-    const controller = new AbortController();
+  // arrives for idleTimeoutMilliseconds, or with result 'aborted' when signal
+  // aborts. With isResumable a failed download keeps its .part file and the
+  // next attempt continues from its end. onProgress(receivedBytes, totalBytes)
+  // runs for every chunk; totalBytes is null when the camera sends no length.
+  async download(
+    url,
+    destinationPath,
+    { idleTimeoutMilliseconds = 20000, onProgress = () => {}, signal = null, isResumable = false } = {},
+  ) {
+    const idleController = new AbortController();
     let idleTimer = null;
     const restartIdleTimer = () => {
       clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => controller.abort(), idleTimeoutMilliseconds);
+      idleTimer = setTimeout(() => idleController.abort(), idleTimeoutMilliseconds);
     };
     const partialPath = `${destinationPath}.part`;
+    const resumeOffset = isResumable ? await fileSize(partialPath) : 0;
     restartIdleTimer();
 
     try {
-      const response = await this.#request(url, { signal: controller.signal });
-      const totalBytes = Number(response.headers.get('content-length')) || null;
-      let receivedBytes = 0;
+      const response = await this.#request(url, {
+        signal: signal ? AbortSignal.any([idleController.signal, signal]) : idleController.signal,
+        headers: resumeOffset > 0 ? { Range: `bytes=${resumeOffset}-` } : {},
+      });
+      const isAppending = response.status === 206;
+      const totalBytes = isAppending
+        ? Number(response.headers.get('content-range')?.split('/')[1]) || null
+        : Number(response.headers.get('content-length')) || null;
+      let receivedBytes = isAppending ? resumeOffset : 0;
       await pipeline(
         Readable.fromWeb(response.body),
         async function* (chunks) {
@@ -299,12 +338,17 @@ export class LumixCamera {
             yield chunk;
           }
         },
-        createWriteStream(partialPath),
+        createWriteStream(partialPath, { flags: isAppending ? 'a' : 'w' }),
       );
       await rename(partialPath, destinationPath);
     } catch (error) {
-      await unlink(partialPath).catch(() => {});
-      if (controller.signal.aborted) {
+      if (!isResumable) {
+        await unlink(partialPath).catch(() => {});
+      }
+      if (signal?.aborted) {
+        throw new CameraError('download aborted', 'aborted');
+      }
+      if (idleController.signal.aborted) {
         throw new CameraError(`download stalled: no data for ${idleTimeoutMilliseconds / 1000}s`, 'timeout');
       }
       throw error;

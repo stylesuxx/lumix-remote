@@ -2,7 +2,13 @@
 // multi-step sequence. A capture runs alone: commands arriving meanwhile are
 // rejected with CameraBusyError, and status reads answer with the last status
 // read, without asking the camera.
+import { parseApex } from './apex.js';
 import { applySetting, readSettings } from './settings.js';
+
+// Time a shot may take beyond its exposure: focusing, writing and the mode switches.
+const CAPTURE_MARGIN_MILLISECONDS = 15000;
+// Used when the shutter speed is unreadable (bulb, or a failed read).
+const UNKNOWN_EXPOSURE_TIMEOUT_MILLISECONDS = 75000;
 
 export class CameraBusyError extends Error {}
 
@@ -112,13 +118,23 @@ export class CameraController {
     await this.liveView.stop();
 
     try {
-      return await this.camera.captureImage();
+      return await this.camera.captureImage({ timeoutMilliseconds: await this.#captureTimeout() });
     } finally {
       try {
         await this.camera.recordMode();
       } catch (error) {
         console.error(`returning to record mode: ${error.message}`);
       }
+    }
+  }
+
+  async #captureTimeout() {
+    try {
+      const exposureSeconds = 2 ** -parseApex(await this.camera.getSetting('shtrspeed'));
+
+      return CAPTURE_MARGIN_MILLISECONDS + exposureSeconds * 1000;
+    } catch {
+      return UNKNOWN_EXPOSURE_TIMEOUT_MILLISECONDS;
     }
   }
 
@@ -179,9 +195,9 @@ export class CameraController {
     }
   }
 
-  // Downloads a file from the card, alongside other commands.
-  download(url, destinationPath, { onProgress } = {}) {
-    return this.camera.download(url, destinationPath, { onProgress });
+  // Downloads a file from the card alongside other commands; options as in LumixCamera.download.
+  download(url, destinationPath, options = {}) {
+    return this.camera.download(url, destinationPath, options);
   }
 
   async close() {

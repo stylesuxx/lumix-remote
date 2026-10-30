@@ -1,32 +1,38 @@
+import { PageModel } from '/page-model.js';
 import { StreamDecoder } from '/stream-codec.js';
 
 const elements = Object.fromEntries(
   [...document.querySelectorAll('[id]')].map((element) => [element.id, element]),
 );
 
-let captures = [];
-let viewerIndex = -1;
-let isCapturing = false;
-let newestCaptureName = null;
-let pendingRawNames = [];
-let rawProgress = null;
+// Captures, viewer, capture state and RAW downloads; app.js renders it.
+const model = new PageModel();
 
 let browsedFolder = null;
 
 // The Refresh button shows a spinner while a full read runs.
 let fullStatusReads = 0;
+let isCameraBusyShown = false;
 
 const LIVE_VIEW_STALL_MILLISECONDS = 2000;
 const STREAM_RECONNECT_MILLISECONDS = 2000;
 let lastFrameAt = 0;
 let shownFrameUrl = null;
+// Width over height of the last decoded frame; the image reports 0x0 while
+// the next frame decodes.
+let liveFrameRatio = 4 / 3;
 let streamAbort = null;
+
+// The shot and file the viewer last loaded, so a re-render keeps its zoom.
+let shownViewerImage = null;
 
 const AUTO_PREVIEW_STORAGE_KEY = 'lumix-remote.auto-preview';
 
 // The last focus point placed on the live view, as fractions of the frame.
 const FOCUS_POINT_STORAGE_KEY = 'lumix-remote.focus-point';
 let focusPoint = readStoredFocusPoint();
+
+const RAW_BADGE_TITLES = { saved: 'RAW saved', downloading: 'RAW downloading', 'on-camera': 'RAW on the camera, not downloaded' };
 
 function showToast(message) {
   elements.toast.textContent = message;
@@ -93,7 +99,7 @@ function renderSettings(settings) {
     const select = document.createElement('select');
     select.id = `setting-${setting.key}`;
     select.name = setting.key;
-    select.disabled = !setting.isEditable || isCapturing;
+    select.disabled = !setting.isEditable || model.isCameraBusy;
     if (setting.value === null) {
       select.append(new Option('n/a', ''));
     }
@@ -103,6 +109,7 @@ function renderSettings(settings) {
     }
 
     select.addEventListener('change', () => changeSetting(select, setting.key));
+
     return [label, select];
   });
   elements.settings.replaceChildren(...rows);
@@ -149,11 +156,158 @@ async function refreshStatus({ isFull = false } = {}) {
 // each change and capture, and when the window regains focus (the focus lever
 // and dials are changed on the camera body).
 window.addEventListener('focus', () => {
-  if (!isCapturing) {
+  if (!model.isCameraBusy) {
     refreshStatus({ isFull: true });
   }
 });
 elements.refreshButton.addEventListener('click', () => refreshStatus({ isFull: true }));
+
+// Rendering the model
+function render() {
+  renderCaptureState();
+  renderSession();
+  renderViewer();
+}
+
+function renderCaptureState() {
+  elements.captureButton.disabled = model.isCaptureBlocked;
+  const overlayText = model.captureOverlayText;
+  elements.captureOverlay.hidden = overlayText === null;
+  elements.captureOverlay.textContent = overlayText ?? '';
+
+  // Settings lock while the camera fires and re-read once it is free.
+  if (model.isCameraBusy && !isCameraBusyShown) {
+    for (const select of elements.settings.querySelectorAll('select')) {
+      select.disabled = true;
+    }
+  }
+
+  isCameraBusyShown = model.isCameraBusy;
+}
+
+function renderSession() {
+  if (document.activeElement !== elements.directoryInput) {
+    elements.directoryInput.value = model.directory;
+  }
+
+  const { camera } = model;
+  elements.cameraInfo.textContent = camera
+    ? [camera.model, camera.firmware && `firmware ${camera.firmware}`].filter(Boolean).join(' · ')
+    : '';
+
+  const raw = model.rawSummary;
+  elements.downloads.textContent = raw.downloading ? `RAW downloading: ${raw.downloading}` : '';
+  const percent = raw.percent === null ? '' : ` ${raw.percent}%`;
+  if (raw.downloading > 0) {
+    elements.downloadRawButton.textContent = `Downloading RAW (${raw.downloading} left)${percent}`;
+    elements.downloadRawButton.title = raw.progressName ? `${raw.progressName}.RW2${percent}` : '';
+  } else {
+    elements.downloadRawButton.textContent = raw.onCamera ? `Download RAW (${raw.onCamera})` : 'Download RAW';
+    elements.downloadRawButton.title = 'Download the RAW files of every shot in this folder that has none yet';
+  }
+
+  elements.downloadRawButton.classList.toggle('is-working', raw.downloading > 0);
+  // Stays clickable while downloading when more shots still have their RAW on the card.
+  elements.downloadRawButton.disabled = raw.onCamera === 0;
+
+  renderGallery();
+}
+
+// The RAW badge is solid once the RAW is saved, outlined while it downloads
+// and dashed while it is only on the card.
+function rawBadge(entry) {
+  if (entry.raw === null) {
+    return null;
+  }
+
+  const badge = document.createElement('span');
+  badge.className = `raw-badge is-${entry.raw}`;
+  badge.textContent = 'RAW';
+  badge.title = RAW_BADGE_TITLES[entry.raw];
+
+  return badge;
+}
+
+function renderGallery() {
+  const { captures } = model;
+  elements.captureCount.textContent = captures.length ? `(${captures.length})` : '';
+  elements.gallery.replaceChildren(
+    ...captures.map((entry) => {
+      const item = document.createElement('div');
+      item.className = 'gallery-item';
+      item.classList.toggle('is-new', entry.name === model.newestCaptureName);
+
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'gallery-open';
+      open.title = entry.files.join(', ') || entry.name;
+      const image = document.createElement('img');
+      image.loading = 'lazy';
+      image.src = `/files/preview/${encodeURIComponent(entry.name)}.jpg?v=${Math.round(entry.modifiedAt)}`;
+      image.alt = entry.name;
+      open.append(image);
+      open.addEventListener('click', () => {
+        model.openViewer(entry.name);
+        render();
+      });
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'gallery-delete';
+      remove.title = `Delete ${entry.name}`;
+      remove.setAttribute('aria-label', `Delete ${entry.name}`);
+      remove.textContent = '×';
+      remove.addEventListener('click', () => deleteCapture(entry.name));
+
+      item.append(open, remove);
+      const badge = rawBadge(entry);
+      if (badge) {
+        item.append(badge);
+      }
+
+      return item;
+    }),
+  );
+}
+
+function renderViewer() {
+  const entry = model.viewedCapture;
+  elements.viewer.hidden = entry === null;
+  document.body.classList.toggle('is-viewer-open', entry !== null);
+  if (entry === null) {
+    shownViewerImage = null;
+    return;
+  }
+
+  elements.viewerTitle.textContent = entry.name;
+  elements.viewerFiles.textContent = model.viewerFilesText(entry);
+  elements.viewerDelete.disabled = !model.isViewedCaptureListed;
+  elements.viewerRaw.hidden = entry.raw !== 'on-camera';
+
+  const imageKey = `${entry.name}/${entry.fullImage ?? ''}`;
+  if (imageKey === shownViewerImage) {
+    return;
+  }
+
+  const isNewShot = shownViewerImage?.split('/')[0] !== entry.name;
+  shownViewerImage = imageKey;
+  if (isNewShot) {
+    elements.viewerCanvas.classList.remove('is-zoomed');
+    elements.viewerImage.src = `/files/preview/${encodeURIComponent(entry.name)}.jpg`;
+  }
+
+  // The full JPEG replaces the preview once loaded, so the preview shows meanwhile.
+  if (entry.fullImage) {
+    const fullImage = new Image();
+    const fullSource = `/files/original/${encodeURIComponent(entry.fullImage)}`;
+    fullImage.addEventListener('load', () => {
+      if (shownViewerImage === imageKey) {
+        elements.viewerImage.src = fullSource;
+      }
+    });
+    fullImage.src = fullSource;
+  }
+}
 
 // Live view and server events
 // One stream carries both, since browsers allow six connections per server.
@@ -169,6 +323,22 @@ function showFrame(jpeg) {
 
   if (previousUrl) {
     URL.revokeObjectURL(previousUrl);
+  }
+}
+
+function handleServerEvent(event) {
+  const effects = model.applyServerEvent(event);
+  render();
+  for (const effect of effects) {
+    switch (effect.type) {
+      case 'toast': {
+        showToast(effect.message);
+      } break;
+
+      case 'refresh-status': {
+        refreshStatus({ isFull: true });
+      } break;
+    }
   }
 }
 
@@ -191,7 +361,8 @@ async function readStream(signal) {
   }
 }
 
-// Reconnects after the stream ends or fails, until the signal aborts.
+// Reconnects after the stream ends or fails, until the signal aborts. Every
+// connection starts with a hello event carrying the current state.
 async function keepStreamOpen(signal) {
   while (!signal.aborted) {
     try {
@@ -226,7 +397,6 @@ document.addEventListener('visibilitychange', () => {
   } else {
     openStream();
     refreshStatus({ isFull: true });
-    refreshSession().catch((error) => showToast(error.message));
   }
 });
 window.addEventListener('pagehide', closeStream);
@@ -236,10 +406,13 @@ setInterval(() => {
   placeFocusMarker();
 }, 500);
 
-// The area the image occupies inside its object-fit: contain box.
-function imageContentBox(image) {
+elements.live.addEventListener('load', () => {
+  liveFrameRatio = elements.live.naturalWidth / elements.live.naturalHeight;
+});
+
+// The area a frame of imageRatio occupies inside its object-fit: contain box.
+function imageContentBox(image, imageRatio) {
   const box = image.getBoundingClientRect();
-  const imageRatio = (image.naturalWidth || 16) / (image.naturalHeight || 9);
   const boxRatio = box.width / box.height;
   const width = imageRatio > boxRatio ? box.width : box.height * imageRatio;
   const height = imageRatio > boxRatio ? box.width / imageRatio : box.height;
@@ -258,6 +431,7 @@ function imageContentBox(image) {
 function readStoredFocusPoint() {
   try {
     const stored = JSON.parse(localStorage.getItem(FOCUS_POINT_STORAGE_KEY));
+
     return Number.isFinite(stored?.x) && Number.isFinite(stored?.y) ? stored : null;
   } catch {
     return null;
@@ -279,7 +453,7 @@ function placeFocusMarker() {
     return;
   }
 
-  const frame = imageContentBox(elements.live);
+  const frame = imageContentBox(elements.live, liveFrameRatio);
   const viewportBox = elements.viewport.getBoundingClientRect();
   elements.focusMarker.style.left = `${frame.left - viewportBox.left + focusPoint.x * frame.width}px`;
   elements.focusMarker.style.top = `${frame.top - viewportBox.top + focusPoint.y * frame.height}px`;
@@ -289,11 +463,11 @@ function placeFocusMarker() {
 window.addEventListener('resize', placeFocusMarker);
 
 elements.viewport.addEventListener('click', async (event) => {
-  if (isCapturing) {
+  if (model.isCameraBusy) {
     return;
   }
 
-  const frame = imageContentBox(elements.live);
+  const frame = imageContentBox(elements.live, liveFrameRatio);
   const x = (event.clientX - frame.left) / frame.width;
   const y = (event.clientY - frame.top) / frame.height;
   if (x < 0 || x > 1 || y < 0 || y > 1) {
@@ -333,7 +507,8 @@ for (const button of document.querySelectorAll('[data-focus]')) {
 // With auto preview on, each new shot opens in the viewer and the next
 // capture waits until its JPEG is saved. With it off, the next capture is
 // possible once the camera has taken the picture, and the JPEG saves in the
-// background. The choice is remembered in this browser.
+// background. The choice is remembered in this browser; each capture keeps
+// the choice it started with.
 function readStoredAutoPreview() {
   try {
     return localStorage.getItem(AUTO_PREVIEW_STORAGE_KEY) !== 'off';
@@ -352,98 +527,19 @@ elements.autoPreview.addEventListener('change', () => {
 });
 
 async function capture() {
-  if (isCapturing) {
+  if (model.isCaptureBlocked) {
     return;
   }
 
   try {
-    // While the new shot is shown, live view waits until its JPEG is saved.
-    await api('POST', '/api/capture', { isLiveViewHeld: elements.autoPreview.checked });
+    await api('POST', '/api/capture', { isAutoPreview: elements.autoPreview.checked });
   } catch (error) {
     showToast(`Capture failed: ${error.message}`);
   }
 }
 elements.captureButton.addEventListener('click', capture);
 
-function setCapturing(isActive, message) {
-  isCapturing = isActive;
-  elements.captureButton.disabled = isActive;
-  elements.captureOverlay.hidden = !isActive;
-  elements.captureOverlay.textContent = message ?? '';
-  if (isActive) {
-    for (const select of elements.settings.querySelectorAll('select')) {
-      select.disabled = true;
-    }
-  } else {
-    // Re-rendering the settings restores each dropdown's own enabled state.
-    refreshStatus({ isFull: true });
-  }
-}
-
-function handleCaptureEvent(event) {
-  switch (event.phase) {
-    case 'shooting': {
-      setCapturing(true, 'Taking picture...');
-    } break;
-
-    case 'shot': {
-      if (elements.autoPreview.checked) {
-        setCapturing(true, 'Saving JPEG...');
-      } else {
-        setCapturing(false);
-      }
-    } break;
-
-    case 'downloading': {
-      newestCaptureName = event.name;
-      if (elements.autoPreview.checked) {
-        // The new capture is not in the gallery list until the JPEG is saved.
-        viewerIndex = -1;
-        openViewer({ name: event.name, files: [], fullImage: null, raw: null });
-      } else {
-        refreshSession();
-      }
-    } break;
-
-    case 'done': {
-      const isViewerShowingIt = !elements.viewer.hidden && elements.viewerTitle.textContent === event.name;
-      if (isCapturing && elements.autoPreview.checked) {
-        setCapturing(false);
-      }
-
-      refreshSession(isViewerShowingIt ? { openName: event.name } : {});
-    } break;
-
-    case 'error': {
-      setCapturing(false);
-      showToast(`Capture failed: ${event.error}`);
-    } break;
-  }
-}
-
 // RAW downloads
-// A capture's RAW state: 'saved', 'downloading', 'on-camera' or null.
-function rawState(entry) {
-  if (entry.raw !== 'saved' && pendingRawNames.includes(entry.name)) {
-    return 'downloading';
-  }
-
-  if (entry.raw === 'downloading') {
-    return 'on-camera';
-  }
-
-  return entry.raw;
-}
-
-function renderPendingRaw(names) {
-  pendingRawNames = names;
-  elements.downloads.textContent = names.length ? `RAW downloading: ${names.length}` : '';
-  elements.downloads.title = names.join(', ');
-
-  renderGallery();
-  renderViewerActions();
-}
-
 async function downloadRaw(names) {
   try {
     const { queued } = await api('POST', '/api/raw', names ? { names } : {});
@@ -456,166 +552,30 @@ async function downloadRaw(names) {
 }
 elements.downloadRawButton.addEventListener('click', () => downloadRaw(null));
 
-function handleRawFailed(event) {
-  if (event.retryInMilliseconds === null) {
-    showToast(`${event.name}.RW2 could not be downloaded and was given up: ${event.error}. It is still on the camera's card.`);
-  } else {
-    showToast(`${event.name}.RW2 download failed (${event.error}), retrying in ${event.retryInMilliseconds / 1000} s`);
-  }
-}
-
-function handleServerEvent(event) {
-  switch (event.type) {
-    case 'hello': {
-      renderPendingRaw(event.pendingRaw);
-      if (event.isCapturing) {
-        setCapturing(true, 'Capture in progress...');
-      }
-    } break;
-
-    case 'capture': {
-      handleCaptureEvent(event);
-    } break;
-
-    case 'raw-pending': {
-      renderPendingRaw(event.names);
-    } break;
-
-    case 'raw-progress': {
-      rawProgress = event;
-      renderGallery();
-    } break;
-
-    case 'raw-saved': {
-      rawProgress = null;
-      refreshSession();
-    } break;
-
-    case 'raw-failed': {
-      handleRawFailed(event);
-    } break;
-  }
-}
-
-// Deleting
+// Deleting; the server pushes the updated listing, which also moves the viewer.
 async function deleteCapture(name) {
   if (!window.confirm(`Delete ${name} from this folder? The camera's card keeps its copy.`)) {
     return;
   }
 
   try {
-    const openName = !elements.viewer.hidden ? captures[viewerIndex]?.name : null;
-    renderSession(await api('DELETE', `/api/captures/${encodeURIComponent(name)}`));
-    if (openName === name) {
-      if (captures.length === 0) {
-        closeViewer();
-      } else {
-        showCapture(Math.min(viewerIndex, captures.length - 1));
-      }
-    }
+    model.applySession(await api('DELETE', `/api/captures/${encodeURIComponent(name)}`));
+    render();
   } catch (error) {
     showToast(`Could not delete ${name}: ${error.message}`);
   }
 }
 
-// Save folder and gallery
-async function refreshSession({ openName } = {}) {
-  const session = await api('GET', '/api/session');
-  renderSession(session);
-  if (openName && !elements.viewer.hidden) {
-    const index = captures.findIndex((entry) => entry.name === openName);
-    if (index >= 0) {
-      showCapture(index);
-    }
-  }
-}
-
-function renderSession(session) {
-  if (document.activeElement !== elements.directoryInput) {
-    elements.directoryInput.value = session.directory;
-  }
-
-  captures = session.captures;
-  elements.cameraInfo.textContent = session.camera
-    ? [session.camera.model, session.camera.firmware && `firmware ${session.camera.firmware}`].filter(Boolean).join(' · ')
-    : '';
-  renderGallery();
-  renderViewerActions();
-}
-
-// The RAW badge is solid once the RAW is saved, outlined while it downloads
-// and dashed while it is only on the card.
-function rawBadge(entry) {
-  const state = rawState(entry);
-  if (state === null) {
-    return null;
-  }
-
-  const titles = { saved: 'RAW saved', downloading: 'RAW downloading', 'on-camera': 'RAW on the camera, not downloaded' };
-  const badge = document.createElement('span');
-  badge.className = `raw-badge is-${state}`;
-  badge.textContent = 'RAW';
-  badge.title = titles[state];
-
-  return badge;
-}
-
-function renderGallery() {
-  elements.captureCount.textContent = captures.length ? `(${captures.length})` : '';
-  const missingRaw = captures.filter((entry) => rawState(entry) === 'on-camera').length;
-  const isDownloadingRaw = pendingRawNames.length > 0;
-  if (isDownloadingRaw) {
-    const percent = rawProgress?.totalBytes ? ` ${Math.floor((rawProgress.receivedBytes / rawProgress.totalBytes) * 100)}%` : '';
-    elements.downloadRawButton.textContent = `Downloading RAW (${pendingRawNames.length} left)${percent}`;
-    elements.downloadRawButton.title = rawProgress ? `${rawProgress.name}.RW2${percent}` : pendingRawNames.join(', ');
-  } else {
-    elements.downloadRawButton.textContent = missingRaw ? `Download RAW (${missingRaw})` : 'Download RAW';
-  }
-
-  elements.downloadRawButton.classList.toggle('is-working', isDownloadingRaw);
-  // Stays clickable while downloading when more shots still have their RAW on the card.
-  elements.downloadRawButton.disabled = missingRaw === 0;
-
-  elements.gallery.replaceChildren(
-    ...captures.map((entry, index) => {
-      const item = document.createElement('div');
-      item.className = 'gallery-item';
-      item.classList.toggle('is-new', entry.name === newestCaptureName);
-
-      const open = document.createElement('button');
-      open.type = 'button';
-      open.className = 'gallery-open';
-      open.title = entry.files.join(', ') || entry.name;
-      const image = document.createElement('img');
-      image.loading = 'lazy';
-      image.src = `/files/preview/${encodeURIComponent(entry.name)}.jpg?v=${Math.round(entry.modifiedAt)}`;
-      image.alt = entry.name;
-      open.append(image);
-      open.addEventListener('click', () => showCapture(index));
-
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.className = 'gallery-delete';
-      remove.title = `Delete ${entry.name}`;
-      remove.setAttribute('aria-label', `Delete ${entry.name}`);
-      remove.textContent = '×';
-      remove.addEventListener('click', () => deleteCapture(entry.name));
-
-      item.append(open, remove);
-      const badge = rawBadge(entry);
-      if (badge) {
-        item.append(badge);
-      }
-
-      return item;
-    }),
-  );
+// Save folder
+async function useFolder(directory) {
+  model.applySession(await api('POST', '/api/session', { directory }));
+  render();
 }
 
 elements.directoryForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   try {
-    renderSession(await api('POST', '/api/session', { directory: elements.directoryInput.value }));
+    await useFolder(elements.directoryInput.value);
     elements.directoryInput.blur();
   } catch (error) {
     showToast(error.message);
@@ -700,7 +660,7 @@ elements.folderNewName.addEventListener('keydown', (event) => {
 
 elements.folderChoose.addEventListener('click', async () => {
   try {
-    renderSession(await api('POST', '/api/session', { directory: browsedFolder.path }));
+    await useFolder(browsedFolder.path);
     elements.folderDialog.close();
   } catch (error) {
     showToast(error.message);
@@ -708,64 +668,15 @@ elements.folderChoose.addEventListener('click', async () => {
 });
 
 // Viewer
-function openViewer(entry) {
-  elements.viewer.hidden = false;
-  document.body.classList.add('is-viewer-open');
-  elements.viewerCanvas.classList.remove('is-zoomed');
-  elements.viewerTitle.textContent = entry.name;
-  elements.viewerFiles.textContent = viewerFilesText(entry);
-  // The full JPEG replaces the preview once loaded, so the preview shows meanwhile.
-  elements.viewerImage.src = `/files/preview/${encodeURIComponent(entry.name)}.jpg`;
-  if (entry.fullImage) {
-    const fullImage = new Image();
-    const fullSource = `/files/original/${encodeURIComponent(entry.fullImage)}`;
-    fullImage.addEventListener('load', () => {
-      if (elements.viewerTitle.textContent === entry.name) {
-        elements.viewerImage.src = fullSource;
-      }
-    });
-    fullImage.src = fullSource;
-  }
-
-  renderViewerActions();
-}
-
-function viewerFilesText(entry) {
-  if (entry.files.length > 0) {
-    return entry.files.join('  ');
-  }
-
-  // A RAW-only shot has no JPEG; the viewer shows the camera's preview.
-  if (entry.raw !== null) {
-    return 'RAW only: preview shown';
-  }
-
-  return 'saving JPEG...';
-}
-
-function viewedCapture() {
-  return elements.viewer.hidden ? null : (captures[viewerIndex] ?? null);
-}
-
-function renderViewerActions() {
-  const entry = viewedCapture();
-  elements.viewerDelete.disabled = entry === null;
-  elements.viewerRaw.hidden = entry === null || rawState(entry) !== 'on-camera';
-}
-
-function showCapture(index) {
-  if (index < 0 || index >= captures.length) {
-    return;
-  }
-
-  viewerIndex = index;
-  openViewer(captures[index]);
-}
-
 function closeViewer() {
-  elements.viewer.hidden = true;
-  document.body.classList.remove('is-viewer-open');
-  viewerIndex = -1;
+  model.closeViewer();
+  render();
+}
+
+// Captures are listed newest first, so "previous" is one further down the list.
+function stepViewer(offset) {
+  model.stepViewer(offset);
+  render();
 }
 
 // Zooms to 100% around the clicked point so focus can be checked.
@@ -777,7 +688,7 @@ function toggleZoom(event) {
     return;
   }
 
-  const box = imageContentBox(image);
+  const box = imageContentBox(image, image.naturalWidth / image.naturalHeight);
   const clamp = (number) => Math.min(1, Math.max(0, number));
   const relativeX = event ? clamp((event.clientX - box.left) / box.width) : 0.5;
   const relativeY = event ? clamp((event.clientY - box.top) / box.height) : 0.5;
@@ -789,20 +700,17 @@ function toggleZoom(event) {
 elements.viewerCanvas.addEventListener('click', toggleZoom);
 elements.viewerZoom.addEventListener('click', () => toggleZoom());
 elements.viewerClose.addEventListener('click', closeViewer);
-// Captures are listed newest first, so "previous" is the next index.
-elements.viewerPrevious.addEventListener('click', () => showCapture(viewerIndex + 1));
-elements.viewerNext.addEventListener('click', () => showCapture(viewerIndex - 1));
+elements.viewerPrevious.addEventListener('click', () => stepViewer(1));
+elements.viewerNext.addEventListener('click', () => stepViewer(-1));
 elements.viewerDelete.addEventListener('click', () => {
-  const entry = viewedCapture();
-  if (entry) {
-    deleteCapture(entry.name);
+  if (model.isViewedCaptureListed) {
+    deleteCapture(model.viewerName);
   }
 });
 
 elements.viewerRaw.addEventListener('click', () => {
-  const entry = viewedCapture();
-  if (entry) {
-    downloadRaw([entry.name]);
+  if (model.isViewedCaptureListed) {
+    downloadRaw([model.viewerName]);
   }
 });
 
@@ -815,7 +723,7 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
-  const isViewerOpen = !elements.viewer.hidden;
+  const isViewerOpen = model.viewerName !== null;
   switch (event.key) {
     case ' ': {
       event.preventDefault();
@@ -837,7 +745,7 @@ document.addEventListener('keydown', (event) => {
     case 'ArrowRight': {
       const isLeft = event.key === 'ArrowLeft';
       if (isViewerOpen) {
-        showCapture(viewerIndex + (isLeft ? 1 : -1));
+        stepViewer(isLeft ? 1 : -1);
       } else {
         event.preventDefault();
         driveFocus(isLeft ? 'near' : 'far', event.shiftKey ? 'fast' : 'normal');
@@ -863,4 +771,3 @@ if (!document.hidden) {
   openStream();
 }
 refreshStatus({ isFull: true });
-refreshSession().catch((error) => showToast(error.message));

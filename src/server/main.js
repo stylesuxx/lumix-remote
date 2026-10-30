@@ -5,6 +5,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { CameraController } from './camera-controller.js';
+import { CaptureFlow } from './capture-flow.js';
 import { createHttpServer } from './http-server.js';
 import { LiveView } from './liveview.js';
 import { LumixCamera } from './lumix.js';
@@ -39,6 +40,8 @@ const config = await loadConfig();
 const camera = new LumixCamera({ host: options.camera });
 const controller = new CameraController({ camera, liveView: new LiveView({ camera, verbose: options.verbose }) });
 const session = new CaptureSession({ controller, directory: '.' });
+// Live view repeats the request whenever it (re)starts the stream.
+camera.requestAccess().catch((error) => console.error(`camera access: ${error.message}`));
 await session.setDirectory(options.directory ?? config.directory ?? path.join(homedir(), 'Pictures', 'lumix'));
 
 function formatMegabytes(bytes) {
@@ -89,6 +92,7 @@ session.on('raw-failed', ({ name, error, retryInMilliseconds }) => {
 
 const server = createHttpServer({
   controller,
+  captureFlow: new CaptureFlow({ session }),
   session,
   onDirectoryChange: (directory) => saveConfig({ ...config, directory }),
 });

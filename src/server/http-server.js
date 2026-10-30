@@ -1,6 +1,6 @@
 // The page's HTTP interface: static files, one stream per page carrying live
 // view frames and server events, and a JSON interface over the camera
-// controller and capture session.
+// controller, the capture flow and the capture session.
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { encodeEvent, encodeFrame, STREAM_CONTENT_TYPE } from '../shared/stream-codec.js';
 import { CameraBusyError } from './camera-controller.js';
 import { CameraError } from './lumix.js';
-import { createDirectory, InvalidCaptureError, listDirectories } from './session.js';
+import { createDirectory, InvalidFolderError, listDirectories } from './folders.js';
+import { InvalidCaptureError } from './session.js';
 import { UnknownSettingError } from './settings.js';
 
 function sourceFile(relativePath) {
@@ -20,6 +21,7 @@ function sourceFile(relativePath) {
 const STATIC_FILES = {
   '/': [sourceFile('../browser/index.html'), 'text/html; charset=utf-8'],
   '/app.js': [sourceFile('../browser/app.js'), 'text/javascript; charset=utf-8'],
+  '/page-model.js': [sourceFile('../browser/page-model.js'), 'text/javascript; charset=utf-8'],
   '/style.css': [sourceFile('../browser/style.css'), 'text/css; charset=utf-8'],
   '/stream-codec.js': [sourceFile('../shared/stream-codec.js'), 'text/javascript; charset=utf-8'],
 };
@@ -28,7 +30,12 @@ const STATIC_FILES = {
 class RequestError extends Error {}
 
 function statusFor(error) {
-  if (error instanceof RequestError || error instanceof UnknownSettingError || error instanceof InvalidCaptureError) {
+  const isRequestError =
+    error instanceof RequestError ||
+    error instanceof UnknownSettingError ||
+    error instanceof InvalidCaptureError ||
+    error instanceof InvalidFolderError;
+  if (isRequestError) {
     return 400;
   }
 
@@ -89,10 +96,12 @@ function contentTypeFor(fileName) {
   return /\.jpe?g$/i.test(fileName) ? 'image/jpeg' : 'application/octet-stream';
 }
 
-// controller: CameraController. session: CaptureSession. onDirectoryChange is
-// called with the new save folder after the page changes it.
-export function createHttpServer({ controller, session, onDirectoryChange = async () => {} }) {
+// controller: CameraController. captureFlow: CaptureFlow. session:
+// CaptureSession. onDirectoryChange is called with the new save folder after
+// the page changes it.
+export function createHttpServer({ controller, captureFlow, session, onDirectoryChange = async () => {} }) {
   const streamClients = new Set();
+  let isSessionBroadcastQueued = false;
 
   function broadcast(event) {
     const part = encodeEvent(event);
@@ -101,43 +110,32 @@ export function createHttpServer({ controller, session, onDirectoryChange = asyn
     }
   }
 
-  session.on('raw-pending', (names) => broadcast({ type: 'raw-pending', names }));
+  // Several changes in a row produce one listing.
+  function queueSessionBroadcast() {
+    if (isSessionBroadcastQueued) {
+      return;
+    }
+
+    isSessionBroadcastQueued = true;
+    setImmediate(async () => {
+      isSessionBroadcastQueued = false;
+      broadcast({ type: 'session', session: await session.snapshot() });
+    });
+  }
+
+  captureFlow.on('capture', (step) => broadcast({ type: 'capture', ...step }));
+  session.on('change', queueSessionBroadcast);
   session.on('raw-progress', (progress) => broadcast({ type: 'raw-progress', ...progress }));
-  session.on('raw-saved', ({ name }) => broadcast({ type: 'raw-saved', name }));
   session.on('raw-failed', ({ name, error, retryInMilliseconds }) =>
     broadcast({ type: 'raw-failed', name, error: error.message, retryInMilliseconds }),
   );
 
-  async function sessionState() {
-    return {
-      directory: session.directory,
-      captures: await session.listCaptures(),
-      camera: await session.readCameraInfo(),
-    };
-  }
-
-  async function runCapture({ isLiveViewHeld }) {
-    broadcast({ type: 'capture', phase: 'shooting' });
-    try {
-      const { name, files } = await session.capture({
-        isLiveViewHeld,
-        onShot: () => broadcast({ type: 'capture', phase: 'shot' }),
-        onPreview: (previewName) => broadcast({ type: 'capture', phase: 'downloading', name: previewName }),
-      });
-      broadcast({ type: 'capture', phase: 'done', name, files });
-    } catch (error) {
-      console.error(`capture: ${error.message}`);
-      broadcast({ type: 'capture', phase: 'error', error: error.message });
-    }
-  }
-
   // Browsers allow six connections per server, so each page gets one stream
-  // for both live view and events. It opens with a hello event.
-  function serveStream(request, response) {
+  // for both live view and events. It opens with a hello event holding the
+  // capture state and the save folder's listing.
+  async function serveStream(request, response) {
     response.writeHead(200, { 'Content-Type': STREAM_CONTENT_TYPE, 'Cache-Control': 'no-store', Connection: 'close' });
-    response.write(
-      encodeEvent({ type: 'hello', isCapturing: controller.isCapturing, pendingRaw: session.pendingRawNames }),
-    );
+    response.write(encodeEvent({ type: 'hello', capture: captureFlow.state, session: await session.snapshot() }));
     streamClients.add(response);
     const removeViewer = controller.addViewer((frame) => {
       // A client that falls behind skips frames.
@@ -153,86 +151,119 @@ export function createHttpServer({ controller, session, onDirectoryChange = asyn
     });
   }
 
-  const routes = {
-    'GET /api/status': async ({ url }) => controller.readStatus({ isFull: url.searchParams.has('full') }),
-
-    'POST /api/settings': async ({ body }) => {
-      await controller.applySetting(body.key, body.value);
-      return controller.readStatus({ isFull: true });
+  // JSON routes. path is the exact pathname or a pattern whose groups the
+  // handler receives as match.
+  const routes = [
+    {
+      method: 'GET',
+      path: '/api/status',
+      handle: async ({ url }) => controller.readStatus({ isFull: url.searchParams.has('full') }),
     },
+    {
+      method: 'POST',
+      path: '/api/settings',
+      handle: async ({ body }) => {
+        await controller.applySetting(body.key, body.value);
 
-    'POST /api/focus/point': async ({ body }) => {
-      const clamp = (number) => Math.min(1000, Math.max(0, Number(number)));
-      await controller.focusAt(clamp(body.x), clamp(body.y));
-      return { ok: true };
+        return controller.readStatus({ isFull: true });
+      },
     },
+    {
+      method: 'POST',
+      path: '/api/focus/point',
+      handle: async ({ body }) => {
+        const clamp = (number) => Math.min(1000, Math.max(0, Number(number)));
+        await controller.focusAt(clamp(body.x), clamp(body.y));
 
-    'POST /api/focus/drive': async ({ body }) => ({ position: await controller.driveFocus(body.direction, body.speed) }),
+        return { ok: true };
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/focus/drive',
+      handle: async ({ body }) => ({ position: await controller.driveFocus(body.direction, body.speed) }),
+    },
+    {
+      method: 'POST',
+      path: '/api/capture',
+      handle: async ({ body }) => ({ id: captureFlow.start({ isAutoPreview: body.isAutoPreview === true }) }),
+    },
+    {
+      method: 'GET',
+      path: '/api/session',
+      handle: async () => session.snapshot(),
+    },
+    {
+      method: 'POST',
+      path: '/api/session',
+      handle: async ({ body }) => {
+        if (typeof body.directory !== 'string' || body.directory.trim() === '') {
+          throw new RequestError('directory is required');
+        }
 
-    'POST /api/capture': async ({ body }) => {
-      if (controller.isCapturing) {
-        throw new CameraBusyError('a capture is in progress');
+        try {
+          await session.setDirectory(body.directory);
+        } catch (error) {
+          throw new RequestError(`cannot use ${body.directory}: ${error.message}`);
+        }
+
+        await onDirectoryChange(session.directory);
+
+        return session.snapshot();
+      },
+    },
+    {
+      method: 'DELETE',
+      path: /^\/api\/captures\/([^/]+)$/,
+      handle: async ({ match }) => {
+        await session.deleteCapture(decodePathSegment(match[1]));
+
+        return session.snapshot();
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/raw',
+      handle: async ({ body }) => ({ queued: await session.downloadRaw(body.names ?? null) }),
+    },
+    {
+      method: 'GET',
+      path: '/api/directories',
+      handle: async ({ url }) => listDirectories(url.searchParams.get('path') ?? session.directory),
+    },
+    {
+      method: 'POST',
+      path: '/api/directories',
+      handle: async ({ body }) => listDirectories(await createDirectory(body.path, body.name)),
+    },
+  ];
+
+  function findRoute(method, pathname) {
+    for (const route of routes) {
+      if (route.method !== method) {
+        continue;
       }
-      runCapture({ isLiveViewHeld: body.isLiveViewHeld === true });
 
-      return { ok: true };
-    },
-
-    'GET /api/session': async () => sessionState(),
-
-    'POST /api/session': async ({ body }) => {
-      if (typeof body.directory !== 'string' || body.directory.trim() === '') {
-        throw new RequestError('directory is required');
+      const match = typeof route.path === 'string' ? (route.path === pathname ? [pathname] : null) : pathname.match(route.path);
+      if (match) {
+        return { route, match };
       }
+    }
 
-      try {
-        await session.setDirectory(body.directory);
-      } catch (error) {
-        throw new RequestError(`cannot use ${body.directory}: ${error.message}`);
-      }
-
-      await onDirectoryChange(session.directory);
-      return sessionState();
-    },
-
-    'POST /api/raw': async ({ body }) => ({ queued: await session.downloadRaw(body.names ?? null) }),
-
-    'GET /api/directories': async ({ url }) => {
-      const requested = url.searchParams.get('path') ?? session.directory;
-      try {
-        return await listDirectories(requested);
-      } catch (error) {
-        throw new RequestError(`cannot open ${requested}: ${error.message}`);
-      }
-    },
-
-    'POST /api/directories': async ({ body }) => {
-      try {
-        return await listDirectories(await createDirectory(body.path, body.name));
-      } catch (error) {
-        throw new RequestError(error.message);
-      }
-    },
-  };
+    return null;
+  }
 
   async function handle(request, response) {
     const url = new URL(request.url, 'http://localhost');
     if (url.pathname === '/stream') {
-      serveStream(request, response);
+      await serveStream(request, response);
       return;
     }
 
-    const captureMatch = url.pathname.match(/^\/api\/captures\/([^/]+)$/);
-    if (captureMatch && request.method === 'DELETE') {
-      await session.deleteCapture(decodePathSegment(captureMatch[1]));
-      sendJson(response, 200, await sessionState());
-      return;
-    }
-
-    const route = routes[`${request.method} ${url.pathname}`];
-    if (route) {
+    const found = findRoute(request.method, url.pathname);
+    if (found) {
       const body = request.method === 'POST' ? await readJsonBody(request) : {};
-      sendJson(response, 200, await route({ url, body }));
+      sendJson(response, 200, await found.route.handle({ url, body, match: found.match }));
       return;
     }
 

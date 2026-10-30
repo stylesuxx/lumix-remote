@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -19,6 +19,15 @@ test('reads results from XML and comma separated answers', () => {
   assert.equal(parseResult(OK), 'ok');
   assert.equal(parseResult('err_reject,0,0'), 'err_reject');
   assert.equal(parseResult('ok,2304/256,768/256'), 'ok');
+});
+
+test('requests access under the device name', async () => {
+  const { camera, queries } = fakeCamera((query) => (query.startsWith('mode=accctrl') ? 'ok,G70-7448F4,remote,encrypted' : OK));
+  await camera.requestAccess();
+  assert.deepEqual(queries, [
+    'mode=accctrl&type=req_acc&value=0&value2=lumix-remote',
+    'mode=setsetting&type=device_name&value=lumix-remote',
+  ]);
 });
 
 test('parses lens limits', () => {
@@ -81,9 +90,10 @@ test('captureImage waits through err_busy until the image count rises', async ()
   assert.match(queries.at(-1), /^POST .*:60606\/Server0\/CDS_control$/);
 });
 
-test('captureImage gives up after its timeout', async () => {
-  const { camera } = fakeCamera((query) => (query === 'mode=get_content_info' ? contentInfo(5) : OK));
+test('captureImage cancels the shot after its timeout', async () => {
+  const { camera, queries } = fakeCamera((query) => (query === 'mode=get_content_info' ? contentInfo(5) : OK));
   await assert.rejects(camera.captureImage({ timeoutMilliseconds: 20 }), (error) => error.result === 'timeout');
+  assert.equal(queries.at(-1), 'mode=camcmd&value=capture_cancel');
 });
 
 test('commands raise the camera error result', async () => {
@@ -137,4 +147,27 @@ test('download writes the complete file', async (context) => {
 
   assert.equal(await readFile(path.join(directory, 'P1.RW2'), 'utf8'), 'raw bytes');
   assert.deepEqual(await readdir(directory), ['P1.RW2']);
+});
+
+test('a resumable download continues from its partial file', async (context) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'lumix-remote-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(path.join(directory, 'P1.RW2.part'), 'raw ');
+  const ranges = [];
+  const progress = [];
+  const camera = new LumixCamera({
+    fetchFunction: async (url, options) => {
+      ranges.push(options.headers.Range);
+      return new Response('bytes', { status: 206, headers: { 'Content-Range': 'bytes 4-8/9' } });
+    },
+  });
+
+  await camera.download('http://camera/DO1.RW2', path.join(directory, 'P1.RW2'), {
+    isResumable: true,
+    onProgress: (receivedBytes, totalBytes) => progress.push([receivedBytes, totalBytes]),
+  });
+
+  assert.deepEqual(ranges, ['bytes=4-']);
+  assert.deepEqual(progress.at(-1), [9, 9]);
+  assert.equal(await readFile(path.join(directory, 'P1.RW2'), 'utf8'), 'raw bytes');
 });

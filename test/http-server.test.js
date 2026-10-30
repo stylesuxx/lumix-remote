@@ -25,12 +25,27 @@ function fakeController(overrides = {}) {
   };
 }
 
+const SNAPSHOT = { directory: '/photos', captures: [], camera: { model: 'DMC-G70', firmware: '2.2' } };
+
+function fakeCaptureFlow({ isShooting = false } = {}) {
+  return Object.assign(new EventEmitter(), {
+    state: { isShooting, saving: [] },
+    started: [],
+    start(options) {
+      if (this.state.isShooting) {
+        throw new CameraBusyError('a capture is in progress');
+      }
+      this.started.push(options);
+
+      return this.started.length;
+    },
+  });
+}
+
 function fakeSession(overrides = {}) {
   return Object.assign(new EventEmitter(), {
     directory: '/photos',
-    pendingRawNames: [],
-    listCaptures: async () => [],
-    readCameraInfo: async () => ({ model: 'DMC-G70', firmware: '2.2' }),
+    snapshot: async () => SNAPSHOT,
     deleted: [],
     async deleteCapture(name) {
       if (name.includes('/')) {
@@ -44,14 +59,18 @@ function fakeSession(overrides = {}) {
   });
 }
 
-async function serve(context, { controller = fakeController(), session = fakeSession() } = {}) {
-  const server = createHttpServer({ controller, session });
+async function serve(
+  context,
+  { controller = fakeController(), captureFlow = fakeCaptureFlow(), session = fakeSession() } = {},
+) {
+  const server = createHttpServer({ controller, captureFlow, session });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   context.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
   return {
     base,
     controller,
+    captureFlow,
     session,
     request: async (method, path, body) => {
       const response = await fetch(`${base}${path}`, {
@@ -97,10 +116,15 @@ test('clamps focus points to the frame and reads full status on request', async 
   assert.equal(status.body.isFull, true);
 });
 
-test('rejects a capture while one is running', async (context) => {
-  const { request } = await serve(context, { controller: fakeController({ isCapturing: true }) });
+test('starts captures with their auto preview choice and rejects one while the camera fires', async (context) => {
+  const { request, captureFlow } = await serve(context);
 
-  assert.equal((await request('POST', '/api/capture')).status, 409);
+  assert.deepEqual((await request('POST', '/api/capture', { isAutoPreview: true })).body, { id: 1 });
+  assert.deepEqual((await request('POST', '/api/capture', {})).body, { id: 2 });
+  assert.deepEqual(captureFlow.started, [{ isAutoPreview: true }, { isAutoPreview: false }]);
+
+  const busy = await serve(context, { captureFlow: fakeCaptureFlow({ isShooting: true }) });
+  assert.equal((await busy.request('POST', '/api/capture')).status, 409);
 });
 
 test('deletes captures by name and queues RAW downloads', async (context) => {
@@ -108,7 +132,7 @@ test('deletes captures by name and queues RAW downloads', async (context) => {
 
   const afterDelete = await request('DELETE', '/api/captures/P1100135');
   assert.equal(afterDelete.status, 200);
-  assert.deepEqual(afterDelete.body.camera, { model: 'DMC-G70', firmware: '2.2' });
+  assert.deepEqual(afterDelete.body, SNAPSHOT);
   assert.equal((await request('DELETE', '/api/captures/..%2Fsecret')).status, 400);
   assert.equal((await request('DELETE', '/api/captures/%E0%A4%A')).status, 400);
   assert.deepEqual(session.deleted, ['P1100135']);
@@ -124,12 +148,14 @@ test('serves the page and the shared stream codec', async (context) => {
   assert.match(page.headers.get('content-type'), /text\/html/);
   const codec = await fetch(`${base}/stream-codec.js`);
   assert.match(await codec.text(), /export class StreamDecoder/);
+  const model = await fetch(`${base}/page-model.js`);
+  assert.match(await model.text(), /export class PageModel/);
   assert.equal((await request('GET', '/files/original/..%2F..%2Fetc%2Fpasswd')).status, 400);
+  assert.equal((await request('GET', '/api/directories?path=/no/such/folder')).status, 400);
 });
 
-test('a stream opens with a hello event and carries later events', async (context) => {
-  const session = fakeSession({ pendingRawNames: ['P7'] });
-  const { base } = await serve(context, { session });
+test('a stream opens with the current state and carries later events', async (context) => {
+  const { base, session, captureFlow } = await serve(context);
   const abort = new AbortController();
   context.after(() => abort.abort());
 
@@ -137,14 +163,23 @@ test('a stream opens with a hello event and carries later events', async (contex
   const reader = response.body.getReader();
   const decoder = new StreamDecoder();
   const events = [];
-  session.emit('raw-pending', ['P7', 'P8']);
-  while (events.length < 2) {
-    const { value } = await reader.read();
-    events.push(...decoder.push(value).map((part) => part.event));
-  }
+  const readEvents = async (count) => {
+    while (events.length < count) {
+      const { value } = await reader.read();
+      events.push(...decoder.push(value).map((part) => part.event));
+    }
+  };
 
-  assert.deepEqual(events, [
-    { type: 'hello', isCapturing: false, pendingRaw: ['P7'] },
-    { type: 'raw-pending', names: ['P7', 'P8'] },
-  ]);
+  await readEvents(1);
+  captureFlow.emit('capture', { phase: 'shot', id: 1, isAutoPreview: false, state: { isShooting: false, saving: [] } });
+  session.emit('change');
+  session.emit('change');
+  await readEvents(3);
+  // The two changes above produce one listing, so the next event is this capture step.
+  captureFlow.emit('capture', { phase: 'saved', id: 1, isAutoPreview: false, state: { isShooting: false, saving: [] } });
+  await readEvents(4);
+
+  assert.deepEqual(events.map((event) => event.phase ?? event.type), ['hello', 'shot', 'session', 'saved']);
+  assert.deepEqual(events[0], { type: 'hello', capture: { isShooting: false, saving: [] }, session: SNAPSHOT });
+  assert.deepEqual(events[2], { type: 'session', session: SNAPSHOT });
 });
