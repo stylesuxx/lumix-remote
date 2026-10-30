@@ -40,8 +40,19 @@ const config = await loadConfig();
 const camera = new LumixCamera({ host: options.camera });
 const controller = new CameraController({ camera, liveView: new LiveView({ camera, verbose: options.verbose }) });
 const session = new CaptureSession({ controller, directory: '.' });
+camera.on('connection', (isConnected) => {
+  if (isConnected) {
+    console.log(`camera connected at ${camera.host}`);
+  } else {
+    console.error(`camera not reachable at ${camera.host}`);
+  }
+});
 // Live view repeats the request whenever it (re)starts the stream.
-camera.requestAccess().catch((error) => console.error(`camera access: ${error.message}`));
+camera.requestAccess().catch((error) => {
+  if (error.result !== 'unreachable') {
+    console.error(`camera access: ${error.message}`);
+  }
+});
 await session.setDirectory(options.directory ?? config.directory ?? path.join(homedir(), 'Pictures', 'lumix'));
 
 function formatMegabytes(bytes) {

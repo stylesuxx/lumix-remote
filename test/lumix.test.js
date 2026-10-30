@@ -30,6 +30,31 @@ test('requests access under the device name', async () => {
   ]);
 });
 
+test('reports when the camera stops and starts answering', async () => {
+  let isReachable = true;
+  const camera = new LumixCamera({
+    fetchFunction: async () => {
+      if (!isReachable) {
+        throw new TypeError('fetch failed');
+      }
+
+      return new Response(OK);
+    },
+  });
+  const changes = [];
+  camera.on('connection', (isConnected) => changes.push(isConnected));
+
+  await camera.getState();
+  await camera.getState();
+  isReachable = false;
+  await assert.rejects(camera.getState());
+  await assert.rejects(camera.getState());
+  isReachable = true;
+  await camera.getState();
+
+  assert.deepEqual(changes, [true, false, true]);
+});
+
 test('parses lens limits', () => {
   assert.deepEqual(parseLensRange('ok,2304/256,768/256,3072/256,-1536/256,0,off,30,30,on,128/1024,on'), {
     maximumAperture: 9,

@@ -47,6 +47,16 @@ test('auto preview opens the new shot and blocks capture until its JPEG is saved
   assert.equal(model.viewerFilesText(model.viewedCapture), 'P2.JPG');
 });
 
+test('camera reachability follows the server and a reconnect re-reads the status', () => {
+  const model = new PageModel();
+  model.applyServerEvent({ type: 'hello', isCameraConnected: true, capture: IDLE, session: session() });
+  assert.equal(model.isCameraConnected, true);
+
+  assert.deepEqual(model.applyServerEvent({ type: 'connection', isConnected: false }), []);
+  assert.equal(model.isCameraConnected, false);
+  assert.deepEqual(model.applyServerEvent({ type: 'connection', isConnected: true }), [{ type: 'refresh-status' }]);
+});
+
 test('a capture keeps the auto preview choice it started with', () => {
   const model = modelWith();
   const savingWithoutPreview = { isShooting: false, saving: [{ id: 1, name: 'P2', isAutoPreview: false }] };

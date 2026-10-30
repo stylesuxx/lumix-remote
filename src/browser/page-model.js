@@ -17,6 +17,8 @@ export class PageModel {
   viewerName = null;
   newestCaptureName = null;
   rawProgress = null;
+  // Whether the server reaches the camera; null until it has tried.
+  isCameraConnected = null;
 
   // Replaces the save folder's listing. A viewer showing a shot that left the
   // listing moves to the shot that took its place, or closes.
@@ -42,8 +44,16 @@ export class PageModel {
   applyServerEvent(event) {
     switch (event.type) {
       case 'hello': {
+        this.isCameraConnected = event.isCameraConnected ?? null;
         this.capture = event.capture;
         this.applySession(event.session);
+      } break;
+
+      case 'connection': {
+        this.isCameraConnected = event.isConnected;
+        if (event.isConnected) {
+          return [{ type: 'refresh-status' }];
+        }
       } break;
 
       case 'capture': {

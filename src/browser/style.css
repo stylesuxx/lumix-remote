@@ -81,6 +81,9 @@ button:disabled, select:disabled { opacity: 0.45; cursor: default; }
   cursor: crosshair;
 }
 .viewport img { width: 100%; height: 100%; object-fit: contain; display: block; }
+/* The image keeps its box before the first frame so the focus marker can be placed. */
+.viewport img.is-empty { visibility: hidden; }
+.viewport img.is-stale { opacity: 0.35; }
 .viewport-message {
   position: absolute;
   inset: 0;

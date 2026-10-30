@@ -60,8 +60,8 @@ async function api(method, path, body) {
 
 // Camera status and settings
 function renderStatus(status) {
-  elements.connection.textContent = status.isConnected ? 'connected' : 'camera not reachable';
-  elements.connection.className = `chip ${status.isConnected ? 'is-ok' : 'is-error'}`;
+  model.isCameraConnected = status.isConnected;
+  renderConnection();
   elements.battery.textContent = status.state?.battery ? `battery ${status.state.battery}` : '';
   elements.shots.textContent = status.state?.remainingShots ? `${status.state.remainingShots} shots left` : '';
 
@@ -164,9 +164,19 @@ elements.refreshButton.addEventListener('click', () => refreshStatus({ isFull: t
 
 // Rendering the model
 function render() {
+  renderConnection();
   renderCaptureState();
   renderSession();
   renderViewer();
+}
+
+function renderConnection() {
+  if (model.isCameraConnected === null) {
+    return;
+  }
+
+  elements.connection.textContent = model.isCameraConnected ? 'connected' : 'camera not reachable';
+  elements.connection.className = `chip ${model.isCameraConnected ? 'is-ok' : 'is-error'}`;
 }
 
 function renderCaptureState() {
@@ -320,6 +330,7 @@ function showFrame(jpeg) {
   const previousUrl = shownFrameUrl;
   shownFrameUrl = frameUrl;
   elements.live.src = frameUrl;
+  elements.live.classList.remove('is-empty');
 
   if (previousUrl) {
     URL.revokeObjectURL(previousUrl);
@@ -402,7 +413,10 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pagehide', closeStream);
 
 setInterval(() => {
-  elements.liveMessage.hidden = Date.now() - lastFrameAt < LIVE_VIEW_STALL_MILLISECONDS;
+  const isStalled = Date.now() - lastFrameAt >= LIVE_VIEW_STALL_MILLISECONDS;
+  elements.liveMessage.hidden = !isStalled;
+  elements.liveMessage.textContent = model.isCameraConnected === false ? 'Camera not reachable' : 'Waiting for live view';
+  elements.live.classList.toggle('is-stale', isStalled);
   placeFocusMarker();
 }, 500);
 

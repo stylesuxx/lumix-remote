@@ -13,6 +13,7 @@ import { UnknownSettingError } from '../src/server/settings.js';
 function fakeController(overrides = {}) {
   return {
     isCapturing: false,
+    camera: Object.assign(new EventEmitter(), { isConnected: true }),
     calls: [],
     addViewer: () => () => {},
     readStatus: async ({ isFull }) => ({ isConnected: true, isFull }),
@@ -155,7 +156,7 @@ test('serves the page and the shared stream codec', async (context) => {
 });
 
 test('a stream opens with the current state and carries later events', async (context) => {
-  const { base, session, captureFlow } = await serve(context);
+  const { base, session, captureFlow, controller } = await serve(context);
   const abort = new AbortController();
   context.after(() => abort.abort());
 
@@ -177,9 +178,16 @@ test('a stream opens with the current state and carries later events', async (co
   await readEvents(3);
   // The two changes above produce one listing, so the next event is this capture step.
   captureFlow.emit('capture', { phase: 'saved', id: 1, isAutoPreview: false, state: { isShooting: false, saving: [] } });
-  await readEvents(4);
+  controller.camera.emit('connection', false);
+  await readEvents(5);
 
-  assert.deepEqual(events.map((event) => event.phase ?? event.type), ['hello', 'shot', 'session', 'saved']);
-  assert.deepEqual(events[0], { type: 'hello', capture: { isShooting: false, saving: [] }, session: SNAPSHOT });
+  assert.deepEqual(events.map((event) => event.phase ?? event.type), ['hello', 'shot', 'session', 'saved', 'connection']);
+  assert.deepEqual(events[0], {
+    type: 'hello',
+    isCameraConnected: true,
+    capture: { isShooting: false, saving: [] },
+    session: SNAPSHOT,
+  });
   assert.deepEqual(events[2], { type: 'session', session: SNAPSHOT });
+  assert.deepEqual(events[4], { type: 'connection', isConnected: false });
 });

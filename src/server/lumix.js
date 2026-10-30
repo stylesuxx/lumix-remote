@@ -1,5 +1,6 @@
 // Client for the HTTP API that Panasonic Lumix cameras expose over WiFi
 // (cam.cgi on port 80, UPnP ContentDirectory on port 60606).
+import { EventEmitter } from 'node:events';
 import { createWriteStream } from 'node:fs';
 import { rename, stat, unlink } from 'node:fs/promises';
 import { Readable } from 'node:stream';
@@ -114,10 +115,15 @@ async function fileSize(filePath) {
   }
 }
 
-export class LumixCamera {
+// Events: 'connection' (isConnected) when the camera starts or stops answering.
+export class LumixCamera extends EventEmitter {
   #queue = Promise.resolve();
 
+  // Whether the last request reached the camera; null before the first one.
+  isConnected = null;
+
   constructor({ host = '192.168.54.1', fetchFunction = fetch, pollIntervalMilliseconds = 1000 } = {}) {
+    super();
     this.host = host;
     this.fetchFunction = fetchFunction;
     this.pollIntervalMilliseconds = pollIntervalMilliseconds;
@@ -138,14 +144,27 @@ export class LumixCamera {
         signal: options.signal ?? AbortSignal.timeout(timeoutMilliseconds),
       });
     } catch (error) {
+      // A request aborted by its caller says nothing about the camera.
+      if (!options.signal) {
+        this.#setConnected(false);
+      }
       throw new CameraError(`camera unreachable at ${this.host}: ${error.cause?.code ?? error.message}`, 'unreachable');
     }
+
+    this.#setConnected(true);
 
     if (!response.ok) {
       throw new CameraError(`HTTP ${response.status} from ${url}`);
     }
 
     return response;
+  }
+
+  #setConnected(isConnected) {
+    if (this.isConnected !== isConnected) {
+      this.isConnected = isConnected;
+      this.emit('connection', isConnected);
+    }
   }
 
   command(query) {

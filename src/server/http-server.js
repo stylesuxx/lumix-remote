@@ -124,6 +124,7 @@ export function createHttpServer({ controller, captureFlow, session, onDirectory
   }
 
   captureFlow.on('capture', (step) => broadcast({ type: 'capture', ...step }));
+  controller.camera.on('connection', (isConnected) => broadcast({ type: 'connection', isConnected }));
   session.on('change', queueSessionBroadcast);
   session.on('raw-progress', (progress) => broadcast({ type: 'raw-progress', ...progress }));
   session.on('raw-failed', ({ name, error, retryInMilliseconds }) =>
@@ -132,10 +133,17 @@ export function createHttpServer({ controller, captureFlow, session, onDirectory
 
   // Browsers allow six connections per server, so each page gets one stream
   // for both live view and events. It opens with a hello event holding the
-  // capture state and the save folder's listing.
+  // camera's reachability, the capture state and the save folder's listing.
   async function serveStream(request, response) {
     response.writeHead(200, { 'Content-Type': STREAM_CONTENT_TYPE, 'Cache-Control': 'no-store', Connection: 'close' });
-    response.write(encodeEvent({ type: 'hello', capture: captureFlow.state, session: await session.snapshot() }));
+    response.write(
+      encodeEvent({
+        type: 'hello',
+        isCameraConnected: controller.camera.isConnected,
+        capture: captureFlow.state,
+        session: await session.snapshot(),
+      }),
+    );
     streamClients.add(response);
     const removeViewer = controller.addViewer((frame) => {
       // A client that falls behind skips frames.
