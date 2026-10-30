@@ -44,6 +44,8 @@ function isPlainName(name) {
 // }), where retryInMilliseconds is null once given up.
 export class CaptureSession extends EventEmitter {
   #queue;
+  #releaseRawLiveViewHold = null;
+  #isLiveViewShownDuringRaw = false;
 
   // controller: something with capture() and download(url, destinationPath),
   // normally the CameraController.
@@ -58,6 +60,7 @@ export class CaptureSession extends EventEmitter {
     });
     this.#queue.on('change', () => {
       this.emit('raw-pending', this.#queue.pendingKeys);
+      this.#updateRawLiveViewHold();
       this.emit('change');
     });
     this.#queue.on('progress', (job) =>
@@ -112,17 +115,13 @@ export class CaptureSession extends EventEmitter {
   async capture({ onShot = () => {}, onPreview = () => {}, isLiveViewHeld = false } = {}) {
     await mkdir(this.previewDirectory, { recursive: true });
     this.#queue.pause();
+    const releaseLiveView = isLiveViewHeld ? this.controller.holdLiveView() : async () => {};
     try {
-      const resources = await this.controller.capture({ isLiveViewHeld });
+      const resources = await this.controller.capture();
       onShot();
-      try {
-        return await this.#saveShot(resources, onPreview);
-      } finally {
-        if (isLiveViewHeld) {
-          await this.controller.releaseLiveView();
-        }
-      }
+      return await this.#saveShot(resources, onPreview);
     } finally {
+      await releaseLiveView();
       this.#queue.resume();
     }
   }
@@ -211,14 +210,43 @@ export class CaptureSession extends EventEmitter {
     return captures.sort((first, second) => second.modifiedAt - first.modifiedAt);
   }
 
-  // The save folder, its captures (see listCaptures) and the camera's
-  // { model, firmware } read from the newest JPEG, or null without one.
+  // The save folder, its captures (see listCaptures), the camera's
+  // { model, firmware } read from the newest JPEG (or null without one) and
+  // whether live view is paused for RAW downloads.
   async snapshot() {
     const captures = await this.listCaptures();
     const newest = captures.find((capture) => capture.fullImage !== null);
     const camera = newest ? await readCameraInfo(path.join(this.directory, newest.fullImage)).catch(() => null) : null;
 
-    return { directory: this.directory, captures, camera };
+    return { directory: this.directory, captures, camera, isLiveViewPausedForRaw: this.isLiveViewPausedForRaw };
+  }
+
+  // RAW downloads run several times faster without live view, so live view
+  // pauses while any are queued, unless asked back with showLiveViewDuringRaw.
+  get isLiveViewPausedForRaw() {
+    return this.#releaseRawLiveViewHold !== null;
+  }
+
+  showLiveViewDuringRaw() {
+    this.#isLiveViewShownDuringRaw = true;
+    this.#updateRawLiveViewHold();
+    this.emit('change');
+  }
+
+  #updateRawLiveViewHold() {
+    const isDownloading = this.#queue.pendingKeys.length > 0;
+    if (!isDownloading) {
+      this.#isLiveViewShownDuringRaw = false;
+    }
+
+    const isHoldWanted = isDownloading && !this.#isLiveViewShownDuringRaw;
+    if (isHoldWanted && this.#releaseRawLiveViewHold === null) {
+      this.#releaseRawLiveViewHold = this.controller.holdLiveView();
+    } else if (!isHoldWanted && this.#releaseRawLiveViewHold !== null) {
+      const release = this.#releaseRawLiveViewHold;
+      this.#releaseRawLiveViewHold = null;
+      release().catch((error) => console.error(`live view: ${error.message}`));
+    }
   }
 
   // Queues the RAW of every listed capture that has one on the card and not

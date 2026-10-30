@@ -92,6 +92,8 @@ button:disabled, select:disabled { opacity: 0.45; cursor: default; }
   color: var(--text-muted);
   pointer-events: none;
 }
+.viewport-message-body { display: grid; gap: 10px; justify-items: center; }
+.viewport-message button { pointer-events: auto; }
 .focus-marker {
   position: absolute;
   width: 56px;

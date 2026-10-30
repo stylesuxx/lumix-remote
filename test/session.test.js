@@ -22,7 +22,15 @@ function fakeController({ failDownloads = () => false } = {}) {
   const downloaded = [];
   return {
     downloaded,
+    holds: 0,
     capture: async () => RESOURCES,
+    holdLiveView() {
+      this.holds += 1;
+
+      return async () => {
+        this.holds -= 1;
+      };
+    },
     download: async (url, destinationPath, { onProgress = () => {} } = {}) => {
       downloaded.push(url);
       if (failDownloads(url)) {
@@ -86,12 +94,16 @@ test('a held capture releases live view once the JPEG is saved, or saving failed
       steps.push(`download ${url.split('/').at(-1)}`);
       await download(url, destinationPath, options);
     };
-    controller.capture = async ({ isLiveViewHeld }) => {
-      steps.push(`capture held=${isLiveViewHeld}`);
+    controller.capture = async () => {
+      steps.push('capture');
       return RESOURCES;
     };
-    controller.releaseLiveView = async () => {
-      steps.push('release');
+    controller.holdLiveView = () => {
+      steps.push('hold');
+
+      return async () => {
+        steps.push('release');
+      };
     };
     const { session } = await sessionIn(context, controller);
 
@@ -102,7 +114,7 @@ test('a held capture releases live view once the JPEG is saved, or saving failed
       await capture;
     }
 
-    assert.deepEqual(steps, ['capture held=true', 'download DL1100135.JPG', 'download DO1100135.JPG', 'release']);
+    assert.deepEqual(steps, ['hold', 'capture', 'download DL1100135.JPG', 'download DO1100135.JPG', 'release']);
   }
 });
 
@@ -132,6 +144,43 @@ test('Download RAW fetches missing RAW files and marks them saved', async (conte
   assert.equal(await readFile(path.join(directory, 'P1100135.RW2'), 'utf8'), 'http://192.168.54.1:50001/DO1100135.RW2');
   assert.equal((await session.listCaptures())[0].raw, 'saved');
   assert.deepEqual(await session.downloadRaw(), []);
+});
+
+test('live view pauses while RAW files download unless asked back', async (context) => {
+  const controller = fakeController();
+  let finishRaw = null;
+  const download = controller.download;
+  controller.download = async (url, destinationPath, options) => {
+    if (url.endsWith('.RW2')) {
+      await new Promise((resolve) => {
+        finishRaw = resolve;
+      });
+    }
+    await download(url, destinationPath, options);
+  };
+  const { session } = await sessionIn(context, controller);
+  await session.capture();
+
+  await session.downloadRaw();
+  assert.equal(controller.holds, 1);
+  assert.equal((await session.snapshot()).isLiveViewPausedForRaw, true);
+
+  session.showLiveViewDuringRaw();
+  assert.equal(controller.holds, 0);
+  assert.equal(session.isLiveViewPausedForRaw, false);
+
+  const saved = nextEvent(session, 'raw-saved');
+  await eventually(() => assert.notEqual(finishRaw, null));
+  finishRaw();
+  await saved;
+  assert.equal(controller.holds, 0);
+
+  // The next Download RAW pauses live view again.
+  controller.download = download;
+  await rm(path.join(session.directory, 'P1100135.RW2'));
+  await session.downloadRaw();
+  assert.equal(controller.holds, 1);
+  await eventually(() => assert.equal(controller.holds, 0));
 });
 
 test('a failed RAW download is retried and reported', async (context) => {

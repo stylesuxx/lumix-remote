@@ -117,16 +117,20 @@ shoots. The camera's 1920x1080 preview appears within a few seconds, and the
 full-size JPEG replaces it once downloaded. Settings, focus and a second
 capture are refused while the camera is shooting, and the page says so.
 
-**RAW files.** A RAW file (about 15 MB) stays on the camera's card until you
+**RAW files.** A RAW file (about 19 MB) stays on the camera's card until you
 ask for it, since downloading one takes most of the WiFi link and slows
 everything else. Press Download RAW in the gallery bar to fetch the RAW of
 every shot in the folder that has none yet, or Download RAW in the viewer
-for the shot shown. Downloads run one after another while you keep working;
-a chip in the header counts them. A failed download shows a message and is
-retried after 5 s, 15 s, 30 s, 1 min and 2 min. A download fails only when
-no data arrives for 20 seconds, so a slow link still completes. Downloads
-still queued when the server stops are dropped; press Download RAW again
-after the next start.
+for the shot shown. Downloads run one after another; a chip in the header
+counts them. Live view pauses while they run, which makes them several
+times faster (about 15 s instead of 80 s per file on a G7); Show live view
+on the paused view brings it back until the queue is empty. A capture
+pauses the RAW download until its JPEG is saved, and the download then
+continues where it stopped. A failed download shows a message and is
+retried after 5 s, 15 s, 30 s, 1 min and 2 min, again from where it
+stopped. A download fails only when no data arrives for 20 seconds, so a
+slow link still completes. Downloads still queued when the server stops are
+dropped; press Download RAW again after the next start.
 
 The RAW badge on a thumbnail shows its state: dashed while the RAW is only
 on the card, outlined while it downloads, solid once it is saved.

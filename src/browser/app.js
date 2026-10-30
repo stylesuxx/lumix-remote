@@ -415,7 +415,8 @@ window.addEventListener('pagehide', closeStream);
 setInterval(() => {
   const isStalled = Date.now() - lastFrameAt >= LIVE_VIEW_STALL_MILLISECONDS;
   elements.liveMessage.hidden = !isStalled;
-  elements.liveMessage.textContent = model.isCameraConnected === false ? 'Camera not reachable' : 'Waiting for live view';
+  elements.liveMessageText.textContent = model.liveViewMessage;
+  elements.showLiveViewButton.hidden = !model.isLiveViewPausedForRaw;
   elements.live.classList.toggle('is-stale', isStalled);
   placeFocusMarker();
 }, 500);
@@ -565,6 +566,16 @@ async function downloadRaw(names) {
   }
 }
 elements.downloadRawButton.addEventListener('click', () => downloadRaw(null));
+
+elements.showLiveViewButton.addEventListener('click', async (event) => {
+  // The viewport behind the button sets the focus point on click.
+  event.stopPropagation();
+  try {
+    await api('POST', '/api/live-view/show');
+  } catch (error) {
+    showToast(`Could not show live view: ${error.message}`);
+  }
+});
 
 // Deleting; the server pushes the updated listing, which also moves the viewer.
 async function deleteCapture(name) {

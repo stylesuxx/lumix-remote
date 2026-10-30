@@ -57,6 +57,17 @@ test('camera reachability follows the server and a reconnect re-reads the status
   assert.deepEqual(model.applyServerEvent({ type: 'connection', isConnected: true }), [{ type: 'refresh-status' }]);
 });
 
+test('the live view message names why frames are missing', () => {
+  const model = modelWith();
+  assert.equal(model.liveViewMessage, 'Waiting for live view');
+
+  model.applyServerEvent({ type: 'session', session: { ...session(), isLiveViewPausedForRaw: true } });
+  assert.equal(model.liveViewMessage, 'Live view paused while RAW files download');
+
+  model.applyServerEvent({ type: 'connection', isConnected: false });
+  assert.equal(model.liveViewMessage, 'Camera not reachable');
+});
+
 test('a capture keeps the auto preview choice it started with', () => {
   const model = modelWith();
   const savingWithoutPreview = { isShooting: false, saving: [{ id: 1, name: 'P2', isAutoPreview: false }] };

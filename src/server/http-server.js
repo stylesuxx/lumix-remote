@@ -235,6 +235,15 @@ export function createHttpServer({ controller, captureFlow, session, onDirectory
       handle: async ({ body }) => ({ queued: await session.downloadRaw(body.names ?? null) }),
     },
     {
+      method: 'POST',
+      path: '/api/live-view/show',
+      handle: async () => {
+        session.showLiveViewDuringRaw();
+
+        return { ok: true };
+      },
+    },
+    {
       method: 'GET',
       path: '/api/directories',
       handle: async ({ url }) => listDirectories(url.searchParams.get('path') ?? session.directory),

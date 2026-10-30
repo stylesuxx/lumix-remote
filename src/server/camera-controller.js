@@ -19,7 +19,7 @@ export class CameraController {
   #activeCommands = new Set();
   #statusReads = new Map();
   #lastStatus = new Map();
-  #isLiveViewHeld = false;
+  #liveViewHolds = 0;
 
   // camera: a LumixCamera. liveView: a LiveView reading that camera's stream.
   constructor({ camera, liveView, liveViewStopDelayMilliseconds = 2000 }) {
@@ -61,7 +61,7 @@ export class CameraController {
   }
 
   async #startLiveViewIfWatched() {
-    if (this.#viewerCount === 0 || this.isCapturing || this.#isLiveViewHeld) {
+    if (this.#viewerCount === 0 || this.isCapturing || this.#liveViewHolds > 0) {
       return;
     }
 
@@ -90,9 +90,8 @@ export class CameraController {
 
   // Takes a picture and resolves to the card resources of the new image
   // (see LumixCamera.captureImage). Live view pauses meanwhile and the camera
-  // is back in record mode when this resolves. With isLiveViewHeld, live view
-  // stays paused until releaseLiveView, leaving the WiFi link to downloads.
-  async capture({ isLiveViewHeld = false } = {}) {
+  // is back in record mode when this resolves.
+  async capture() {
     if (this.isCapturing) {
       throw new CameraBusyError('a capture is in progress');
     }
@@ -102,14 +101,26 @@ export class CameraController {
       return await this.#capture;
     } finally {
       this.#capture = null;
-      this.#isLiveViewHeld = isLiveViewHeld;
       await this.#startLiveViewIfWatched();
     }
   }
 
-  async releaseLiveView() {
-    this.#isLiveViewHeld = false;
-    await this.#startLiveViewIfWatched();
+  // Pauses live view, leaving the WiFi link to downloads, until the returned
+  // function is called. Holds nest: live view returns once all are released.
+  holdLiveView() {
+    this.#liveViewHolds += 1;
+    this.liveView.stop().catch((error) => console.error(`live view stop: ${error.message}`));
+
+    let isReleased = false;
+    return async () => {
+      if (isReleased) {
+        return;
+      }
+
+      isReleased = true;
+      this.#liveViewHolds -= 1;
+      await this.#startLiveViewIfWatched();
+    };
   }
 
   async #runCapture() {

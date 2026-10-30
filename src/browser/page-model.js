@@ -19,6 +19,7 @@ export class PageModel {
   rawProgress = null;
   // Whether the server reaches the camera; null until it has tried.
   isCameraConnected = null;
+  isLiveViewPausedForRaw = false;
 
   // Replaces the save folder's listing. A viewer showing a shot that left the
   // listing moves to the shot that took its place, or closes.
@@ -27,6 +28,7 @@ export class PageModel {
     const previousIndex = previousNames.indexOf(this.viewerName);
     this.directory = snapshot.directory;
     this.camera = snapshot.camera;
+    this.isLiveViewPausedForRaw = snapshot.isLiveViewPausedForRaw ?? false;
     this.captures = snapshot.captures;
 
     const isViewedShotGone = previousIndex >= 0 && this.#indexOf(this.viewerName) < 0;
@@ -108,6 +110,19 @@ export class PageModel {
   // Capture waits for the camera, and in auto preview for the shown shot's JPEG.
   get isCaptureBlocked() {
     return this.capture.isShooting || this.capture.saving.some((entry) => entry.isAutoPreview);
+  }
+
+  // Why live view shows no frames, for the message over the viewport.
+  get liveViewMessage() {
+    if (this.isCameraConnected === false) {
+      return 'Camera not reachable';
+    }
+
+    if (this.isLiveViewPausedForRaw) {
+      return 'Live view paused while RAW files download';
+    }
+
+    return 'Waiting for live view';
   }
 
   get captureOverlayText() {

@@ -162,14 +162,18 @@ test('live view stops once the last viewer leaves', async () => {
   assert.deepEqual(liveView.calls, ['start', 'start', 'stop']);
 });
 
-test('a capture can hold live view paused until it is released', async () => {
+test('live view stays paused through a capture until every hold is released', async () => {
   const { camera } = cardCamera();
   const { controller, liveView } = controllerFor(camera);
   controller.addViewer(() => {});
 
-  await controller.capture({ isLiveViewHeld: true });
-  assert.deepEqual(liveView.calls, ['start', 'stop']);
+  const releaseFirst = controller.holdLiveView();
+  const releaseSecond = controller.holdLiveView();
+  await controller.capture();
+  await releaseFirst();
+  await releaseFirst();
+  assert.equal(liveView.calls.at(-1), 'stop');
 
-  await controller.releaseLiveView();
-  assert.deepEqual(liveView.calls, ['start', 'stop', 'start']);
+  await releaseSecond();
+  assert.equal(liveView.calls.at(-1), 'start');
 });

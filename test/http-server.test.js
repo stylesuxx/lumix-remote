@@ -56,6 +56,10 @@ function fakeSession(overrides = {}) {
     },
     downloadRaw: async (names) => names ?? ['P1'],
     resolveFile: () => null,
+    isLiveViewShown: false,
+    showLiveViewDuringRaw() {
+      this.isLiveViewShown = true;
+    },
     ...overrides,
   });
 }
@@ -139,6 +143,8 @@ test('deletes captures by name and queues RAW downloads', async (context) => {
   assert.deepEqual(session.deleted, ['P1100135']);
   assert.deepEqual((await request('POST', '/api/raw', { names: ['P2'] })).body, { queued: ['P2'] });
   assert.deepEqual((await request('POST', '/api/raw', {})).body, { queued: ['P1'] });
+  assert.equal((await request('POST', '/api/live-view/show')).status, 200);
+  assert.equal(session.isLiveViewShown, true);
 });
 
 test('serves the page and the shared stream codec', async (context) => {
